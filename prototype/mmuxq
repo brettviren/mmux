@@ -1,0 +1,436 @@
+#!/usr/bin/env bash
+# @describe mmuxq - multi-producer, multi-consumer file-based message queue
+# @version 0.1.0
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Internal helpers (not argc subcommands)
+# ---------------------------------------------------------------------------
+
+_die() { echo "ERROR: $*" >&2; exit 1; }
+_warn() { echo "WARNING: $*" >&2; }
+
+# Resolve QMP from: explicit arg → MMUXQ_PATH env → walk-up CWD → error.
+# Usage: _resolve_qmp [candidate]
+_resolve_qmp() {
+    local candidate="${1:-}"
+    if [[ -n "$candidate" ]]; then
+        [[ -d "$candidate" ]] || _die "QMP does not exist: $candidate"
+        echo "$candidate"
+        return 0
+    fi
+    if [[ -n "${MMUXQ_PATH:-}" ]]; then
+        [[ -d "$MMUXQ_PATH" ]] || _die "MMUXQ_PATH does not exist: $MMUXQ_PATH"
+        echo "$MMUXQ_PATH"
+        return 0
+    fi
+    local dir="$PWD"
+    while true; do
+        if [[ -d "$dir/.mmuxq" ]]; then
+            echo "$dir/.mmuxq"
+            return 0
+        fi
+        [[ "$dir" == "/" ]] && break
+        dir="$(dirname "$dir")"
+    done
+    _die "no QMP found (provide path, set MMUXQ_PATH, or run mmuxq init)"
+}
+
+# Allocate the next sequential ID via atomic mkdir.
+# Usage: _new_id <base_dir>  → prints 0001, 0002, …
+_new_id() {
+    local base="$1"
+    local n=1 id
+    while true; do
+        id="$(printf '%04d' "$n")"
+        if mkdir "$base/$id" 2>/dev/null; then
+            echo "$id"
+            return 0
+        fi
+        n=$(( n + 1 ))
+        [[ "$n" -gt 9999 ]] && _die "ID space exhausted in $base"
+    done
+}
+
+# Find the oldest PMF across all PMPs under <QMP>/producers.
+# Prints the path, or nothing if no PMFs exist.
+_oldest_pmf() {
+    local qmp="$1"
+    find "$qmp/producers" -mindepth 3 -maxdepth 3 -type f \
+        -printf '%T@ %p\n' 2>/dev/null |
+        sort -k1,1n -k2,2 |
+        awk 'NR==1{print $2}'
+}
+
+# Dispatch all pre-existing PMFs in oldest-first order.
+_dispatch_existing() {
+    local qmp="$1"
+    local pmf
+    while true; do
+        pmf="$(_oldest_pmf "$qmp")"
+        [[ -n "$pmf" && -f "$pmf" ]] || break
+        _mdo "$pmf" "$qmp"
+    done
+}
+
+# Message dispatch operation.
+# Usage: _mdo <pmf> <qmp>
+_mdo() {
+    local pmf="$1" qmp="$2"
+    local pmf_name
+    pmf_name="$(basename "$pmf")"
+
+    # Snapshot consumer list at MDO start (sorted by CID = registration order).
+    local consumers=()
+    while IFS= read -r -d '' cdir; do
+        consumers+=("$cdir")
+    done < <(find "$qmp/consumers" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null | sort -z)
+
+    # 1. Hard-link PMF → CMF for each consumer (ignore EEXIST for at-least-once).
+    for cdir in "${consumers[@]+"${consumers[@]}"}"; do
+        ln "$pmf" "$cdir/queue/$pmf_name" 2>/dev/null || true
+    done
+
+    # 2. Remove PMF.
+    rm -f "$pmf"
+
+    # 3. Execute hooks.
+    for cdir in "${consumers[@]+"${consumers[@]}"}"; do
+        local hook_file="$cdir/consumer-hook"
+        local cmf="$cdir/queue/$pmf_name"
+        [[ -f "$hook_file" && -f "$cmf" ]] || continue
+
+        local on_fail="remove"
+        [[ -f "$cdir/consumer-hook-fail" ]] && on_fail="$(< "$cdir/consumer-hook-fail")"
+
+        if MMUXQ_CMF="$cmf" bash -c "$(< "$hook_file")"; then
+            rm -f "$cmf"
+        else
+            _warn "hook failed for $cmf (on-fail: $on_fail)"
+            case "$on_fail" in
+                keep)    ;;
+                faildir) mkdir -p "$cdir/failed"; mv "$cmf" "$cdir/failed/" 2>/dev/null || true ;;
+                *)       rm -f "$cmf" ;;
+            esac
+        fi
+    done
+}
+
+# Classify a dmo path argument.
+_dmo_path_type() {
+    local path="$1"
+    if [[ -f "$path" ]]; then
+        echo pmf
+    elif [[ -d "$path/producers" && -d "$path/consumers" ]]; then
+        echo qmp
+    elif [[ -d "$path" ]]; then
+        echo pmp
+    else
+        _die "path does not exist: $path"
+    fi
+}
+
+# Check dispatcher state; prints "running <pid>", "stale <pid>", or "none".
+_dispatcher_state() {
+    local pidfile="$1"
+    [[ -f "$pidfile" ]] || { echo none; return; }
+    local pid
+    pid="$(< "$pidfile")"
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "running $pid"
+    else
+        echo "stale $pid"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Subcommands
+# ---------------------------------------------------------------------------
+
+# @cmd Initialize a new queue; creates QMP directory structure.
+# @arg qmp* Queue message path (default: .mmuxq in current directory)
+init() {
+    local qmp="${argc_qmp[0]:-.mmuxq}"
+    mkdir -p "$qmp/producers" "$qmp/consumers"
+    echo "initialized: $qmp"
+}
+
+# @cmd Run the dispatcher lifecycle in the foreground.
+# @arg qmp* Queue message path
+dispatcher() {
+    local qmp
+    qmp="$(_resolve_qmp "${argc_qmp[0]:-}")"
+
+    local pidfile="$qmp/dispatcher.pid"
+
+    # 1. Check for existing dispatcher.
+    local state
+    state="$(_dispatcher_state "$pidfile")"
+    if [[ "$state" == running* ]]; then
+        _warn "dispatcher already running (pid ${state#running })"
+        exit 1
+    fi
+
+    # 2. Write PID.
+    echo $$ > "$pidfile"
+
+    local fifo iw_pid=""
+    fifo="$(mktemp -u --suffix=.mmuxq.fifo)"
+    mkfifo "$fifo"
+
+    _dispatcher_cleanup() {
+        [[ -n "$iw_pid" ]] && kill "$iw_pid" 2>/dev/null || true
+        rm -f "$pidfile" "$fifo" 2>/dev/null || true
+    }
+    # EXIT trap handles cleanup; INT/TERM call exit which then fires EXIT.
+    trap _dispatcher_cleanup EXIT
+    trap 'exit 0' INT TERM
+
+    # Open FIFO read-write: non-blocking, keeps write-end alive so the read
+    # loop does not get EOF when inotifywait is momentarily absent (restart).
+    exec 7<>"$fifo"
+
+    _arm_watch() {
+        if [[ -n "$iw_pid" ]]; then
+            kill "$iw_pid" 2>/dev/null || true
+            wait "$iw_pid" 2>/dev/null || true
+            iw_pid=""
+        fi
+
+        # Collect producers/ dir + all existing PMP queue/ dirs to watch.
+        local watch_targets=("$qmp/producers")
+        while IFS= read -r -d '' d; do
+            watch_targets+=("$d")
+        done < <(find "$qmp/producers" -mindepth 2 -maxdepth 2 \
+                      -type d -name queue -print0 2>/dev/null)
+
+        # 3. Arm inotify BEFORE dispatching existing PMFs (startup race fix).
+        inotifywait -m "${watch_targets[@]}" \
+            --format '%w%f'$'\t''%e' \
+            -e close_write -e moved_to -e create \
+            >&7 2>/dev/null &
+        iw_pid=$!
+
+        # 4. Dispatch all pre-existing PMFs.
+        _dispatch_existing "$qmp"
+    }
+
+    _arm_watch
+
+    # 5. Watch loop.
+    local path event
+    while IFS=$'\t' read -r path event <&7; do
+        if [[ "$event" == *ISDIR* ]]; then
+            # New PMP directory created; re-arm watch to include it.
+            _arm_watch
+        elif [[ "$event" == *CLOSE_WRITE* || "$event" == *MOVED_TO* ]]; then
+            [[ -f "$path" ]] && _mdo "$path" "$qmp"
+        fi
+    done
+
+    exec 7<&-
+}
+
+# @cmd Start the dispatcher as a background process.
+# @arg qmp* Queue message path
+start() {
+    local qmp
+    qmp="$(_resolve_qmp "${argc_qmp[0]:-}")"
+
+    local pidfile="$qmp/dispatcher.pid"
+    local state
+    state="$(_dispatcher_state "$pidfile")"
+
+    if [[ "$state" == running* ]]; then
+        _warn "dispatcher already running (pid ${state#running })"
+        exit 0
+    fi
+
+    local script
+    script="$(realpath "${BASH_SOURCE[0]}")"
+    nohup bash "$script" dispatcher "$qmp" >> "$qmp/dispatcher.log" 2>&1 &
+    disown
+
+    # Wait up to 2 s for pid file.
+    local waited=0
+    while (( waited < 20 )); do
+        [[ -f "$pidfile" ]] && break
+        sleep 0.1
+        waited=$(( waited + 1 ))
+    done
+
+    if [[ ! -f "$pidfile" ]]; then
+        echo "ERROR: dispatcher failed to start (see $qmp/dispatcher.log)" >&2
+        exit 1
+    fi
+
+    echo "dispatcher started (pid $(< "$pidfile"))"
+}
+
+# @cmd Show dispatcher status and queue disk usage.
+# @arg qmp* Queue message path
+status() {
+    local qmp
+    qmp="$(_resolve_qmp "${argc_qmp[0]:-}")"
+
+    local pidfile="$qmp/dispatcher.pid"
+    local state
+    state="$(_dispatcher_state "$pidfile")"
+
+    case "$state" in
+        running*)
+            echo "dispatcher: running (pid ${state#running })"
+            ;;
+        stale*)
+            echo "dispatcher: not running (stale pid file, pid ${state#stale })"
+            ;;
+        none)
+            local running_pid
+            running_pid="$(pgrep -f "mmuxq dispatcher $qmp" 2>/dev/null | head -1 || true)"
+            if [[ -n "$running_pid" ]]; then
+                echo "dispatcher: running (pid $running_pid, pid file missing)"
+            else
+                echo "dispatcher: not running (no pid file)"
+            fi
+            ;;
+    esac
+
+    local pmp_size cmp_size pending
+    pmp_size="$(du -sh "$qmp/producers" 2>/dev/null | cut -f1 || echo 0)"
+    cmp_size="$(du -sh "$qmp/consumers" 2>/dev/null | cut -f1 || echo 0)"
+    pending="$(find "$qmp/producers" -mindepth 3 -maxdepth 3 -type f 2>/dev/null | wc -l | tr -d ' ')"
+
+    echo "producers: $pmp_size"
+    echo "consumers: $cmp_size"
+    echo "pending messages: $pending"
+}
+
+# @cmd Stop a running dispatcher.
+# @arg qmp* Queue message path
+stop() {
+    local qmp
+    qmp="$(_resolve_qmp "${argc_qmp[0]:-}")"
+
+    local pidfile="$qmp/dispatcher.pid"
+    local state
+    state="$(_dispatcher_state "$pidfile")"
+
+    case "$state" in
+        running*)
+            local pid="${state#running }"
+            kill "$pid"
+            local waited=0
+            while kill -0 "$pid" 2>/dev/null && (( waited < 30 )); do
+                sleep 0.1
+                waited=$(( waited + 1 ))
+            done
+            rm -f "$pidfile"
+            echo "dispatcher stopped (pid $pid)"
+            ;;
+        stale*)
+            _warn "dispatcher not running (stale pid file, pid ${state#stale })"
+            rm -f "$pidfile"
+            ;;
+        none)
+            _warn "dispatcher not running (no pid file)"
+            ;;
+    esac
+}
+
+# @cmd Execute one message dispatch operation.
+# @arg path* QMP, PMP, or PMF path (default: resolved QMP, oldest PMF)
+dmo() {
+    local path="${argc_path[0]:-}"
+
+    if [[ -z "$path" ]]; then
+        local qmp pmf
+        qmp="$(_resolve_qmp "")"
+        pmf="$(_oldest_pmf "$qmp")"
+        [[ -n "$pmf" && -f "$pmf" ]] || exit 0
+        _mdo "$pmf" "$qmp"
+        echo "$pmf"
+        return
+    fi
+
+    local ptype
+    ptype="$(_dmo_path_type "$path")"
+
+    case "$ptype" in
+        pmf)
+            local qmp
+            qmp="$(dirname "$(dirname "$(dirname "$(dirname "$path")")")")"
+            _mdo "$path" "$qmp"
+            echo "$path"
+            ;;
+        qmp)
+            local pmf
+            pmf="$(_oldest_pmf "$path")"
+            [[ -n "$pmf" && -f "$pmf" ]] || exit 0
+            _mdo "$pmf" "$path"
+            echo "$pmf"
+            ;;
+        pmp)
+            local pmf
+            pmf="$(find "$path" -maxdepth 1 -type f \
+                -printf '%T@ %p\n' 2>/dev/null |
+                sort -k1,1n -k2,2 | awk 'NR==1{print $2}')"
+            [[ -n "$pmf" && -f "$pmf" ]] || exit 0
+            local qmp
+            qmp="$(dirname "$(dirname "$(dirname "$path")")")"
+            _mdo "$pmf" "$qmp"
+            echo "$pmf"
+            ;;
+    esac
+}
+
+# @cmd Register a new producer and print its PMP.
+# @arg qmp* Queue message path
+producer() {
+    local qmp
+    qmp="$(_resolve_qmp "${argc_qmp[0]:-}")"
+
+    local prod_id
+    prod_id="$(_new_id "$qmp/producers")"
+    mkdir -p "$qmp/producers/$prod_id/queue"
+
+    echo "$qmp/producers/$prod_id/queue"
+}
+
+# @cmd Register a new consumer and print its CMP.
+# @option --hook Hook command (CMH); sets consumer-hook file
+# @option --on-hook-fail On-hook-failure mode: remove (default), keep, or faildir
+# @arg qmp* Queue message path
+consumer() {
+    local qmp
+    qmp="$(_resolve_qmp "${argc_qmp[0]:-}")"
+
+    local cons_id
+    cons_id="$(_new_id "$qmp/consumers")"
+    local cdir="$qmp/consumers/$cons_id"
+    mkdir -p "$cdir/queue"
+
+    if [[ -n "${argc_hook:-}" ]]; then
+        printf '%s\n' "${argc_hook}" > "$cdir/consumer-hook"
+        printf '%s\n' "${argc_on_hook_fail:-remove}" > "$cdir/consumer-hook-fail"
+    fi
+
+    echo "$cdir/queue"
+}
+
+# @cmd Deregister a producer or consumer by removing its directory.
+# @arg path! Producer root (<QMP>/producers/<id>) or consumer root (<QMP>/consumers/<id>)
+remove() {
+    local path="${argc_path}"
+    [[ -d "$path" ]] || _die "not a directory: $path"
+    [[ -d "$path/queue" ]] || _die "not a valid PMP/CMP (no queue/ subdirectory): $path"
+
+    local pending
+    pending="$(find "$path/queue" -type f 2>/dev/null | wc -l | tr -d ' ')"
+    (( pending > 0 )) && _warn "removing $path with $pending pending message(s)"
+
+    rm -rf "$path"
+    echo "removed: $path"
+}
+
+eval "$(argc --argc-eval "$0" "$@")"
