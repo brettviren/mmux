@@ -11,6 +11,13 @@ set -euo pipefail
 _die() { echo "ERROR: $*" >&2; exit 1; }
 _warn() { echo "WARNING: $*" >&2; }
 
+# Create QMP directory structure at the given path.
+_init_qmp() {
+    local qmp="$1"
+    mkdir -p "$qmp/producers" "$qmp/consumers"
+    echo "initialized: $qmp"
+}
+
 # Resolve QMP from: explicit arg → MMUXQ_PATH env → walk-up CWD → error.
 # Usage: _resolve_qmp [candidate]
 _resolve_qmp() {
@@ -35,6 +42,33 @@ _resolve_qmp() {
         dir="$(dirname "$dir")"
     done
     _die "no QMP found (provide path, set MMUXQ_PATH, or run mmuxq init)"
+}
+
+# Like _resolve_qmp but auto-inits if no QMP is found.
+# Init messages go to stderr so only the resolved path reaches stdout.
+_ensure_qmp() {
+    local candidate="${1:-}"
+    if [[ -n "$candidate" ]]; then
+        [[ -d "$candidate" ]] || _init_qmp "$candidate" >&2
+        echo "$candidate"
+        return 0
+    fi
+    if [[ -n "${MMUXQ_PATH:-}" ]]; then
+        [[ -d "$MMUXQ_PATH" ]] || _init_qmp "$MMUXQ_PATH" >&2
+        echo "$MMUXQ_PATH"
+        return 0
+    fi
+    local dir="$PWD"
+    while true; do
+        if [[ -d "$dir/.mmuxq" ]]; then
+            echo "$dir/.mmuxq"
+            return 0
+        fi
+        [[ "$dir" == "/" ]] && break
+        dir="$(dirname "$dir")"
+    done
+    _init_qmp ".mmuxq" >&2
+    echo ".mmuxq"
 }
 
 # Allocate the next sequential ID via atomic mkdir.
@@ -152,8 +186,7 @@ _dispatcher_state() {
 # @arg qmp* Queue message path (default: .mmuxq in current directory)
 init() {
     local qmp="${argc_qmp[0]:-.mmuxq}"
-    mkdir -p "$qmp/producers" "$qmp/consumers"
-    echo "initialized: $qmp"
+    _init_qmp "$qmp"
 }
 
 # @cmd Run the dispatcher lifecycle in the foreground.
@@ -236,7 +269,7 @@ dispatcher() {
 # @arg qmp* Queue message path
 start() {
     local qmp
-    qmp="$(_resolve_qmp "${argc_qmp[0]:-}")"
+    qmp="$(_ensure_qmp "${argc_qmp[0]:-}")"
 
     local pidfile="$qmp/dispatcher.pid"
     local state
@@ -388,7 +421,7 @@ dmo() {
 # @arg qmp* Queue message path
 producer() {
     local qmp
-    qmp="$(_resolve_qmp "${argc_qmp[0]:-}")"
+    qmp="$(_ensure_qmp "${argc_qmp[0]:-}")"
 
     local prod_id
     prod_id="$(_new_id "$qmp/producers")"
@@ -403,7 +436,7 @@ producer() {
 # @arg qmp* Queue message path
 consumer() {
     local qmp
-    qmp="$(_resolve_qmp "${argc_qmp[0]:-}")"
+    qmp="$(_ensure_qmp "${argc_qmp[0]:-}")"
 
     local cons_id
     cons_id="$(_new_id "$qmp/consumers")"

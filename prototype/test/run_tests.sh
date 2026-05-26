@@ -2,7 +2,7 @@
 # Run the mmuxq test suite via bats.
 set -euo pipefail
 
-BATS="${BATS:-/home/bv/work/wct/noise/toolkit/test/bats/bin/bats}"
+BATS="${BATS:-$HOME/dev/bats-core/bin/bats}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ ! -x "$BATS" ]]; then
