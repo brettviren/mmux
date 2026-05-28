@@ -1,2 +1,3 @@
-def main() -> None:
-    print("Hello from mmux!")
+from mmux.cli import main
+
+__all__ = ["main"]
