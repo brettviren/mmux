@@ -74,7 +74,7 @@ def status(ctx: click.Context, queue_path: str | None, targets: tuple[str, ...])
     for target in targets:
         def _ssh(cmd: str) -> str:
             r = subprocess.run(
-                ["ssh", "-o", "BatchMode=yes", "-T", target, "bash", "-c", cmd],
+                ["ssh", "-o", "BatchMode=yes", "-T", target, cmd],
                 capture_output=True, text=True,
             )
             return r.stdout.strip() if r.returncode == 0 else ""

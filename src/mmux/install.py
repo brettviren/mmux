@@ -104,7 +104,7 @@ def install(target: str, queue_path: str = "~/.local/state/mmux") -> None:
         if result.returncode != 0:
             log.info("registering %s producer on %s", proto, target)
             pmp = _ssh(target, f"~/.local/bin/mmuxq", "producer", qmp).stdout.strip()
-            _ssh(target, "bash", "-c", f"printf '%s' '{pmp}' > {pmp_file}")
+            _ssh(target, "bash", "-c", f"cat > {pmp_file}", input=pmp)
 
     # 6. Register consumer with cat hook (idempotent: check consumer 0001 exists)
     consumer_dir = f"{qmp}/consumers/0001"
