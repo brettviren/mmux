@@ -1,0 +1,28 @@
+Human checklist, prompts and notes
+
+* TODO Design phase
+
+Claude:
+
+#+begin_src markdown
+Read @initial-design.md and evaluate the design.  Look for any unstated gaps, ambiguities, issues, confusion or areas for improvement.  Give particular attention and address the 'Issues' section at the end.  Write your questions and conclusions to new @initial-review.md file.
+#+end_src
+
+Human: read review, make review-response.md
+
+* TODO Plan phase
+
+Claude:
+
+#+begin_src markdown
+Read @review-response.md and make @plan.md.
+
+implement the design as @mmuxq.sh a Bash script using `argc` for the CLI.  In @test/*.bats write tests using the BATS testing framework.
+#+end_src
+
+* TODO testing and iteration phase
+
+- [ ] try bats tests
+- [ ] iterate on bug fixing
+- [ ] evaluate usability and seek any fundamental design flaws
+- [ ] performance testing to evaluate different implementation language. 

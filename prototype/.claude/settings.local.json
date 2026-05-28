@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//srv/bv/dev/mmux/**)",
+      "Bash(argc --help)",
+      "Bash(argc --argc-create --help)",
+      "Bash(dpkg -l)",
+      "Bash(/home/bv/work/wct/noise/toolkit/test/bats/bin/bats --version)",
+      "Bash(argc --argc-help)",
+      "Bash(inotifywait --version)",
+      "Bash(argc --argc-version)",
+      "Bash(argc --argc-create test_cmd)",
+      "Bash(argc --argc-create hello)",
+      "Bash(chmod +x /srv/bv/dev/mmux/prototype/mmuxq)",
+      "Bash(./mmuxq --help)",
+      "Bash(chmod +x /srv/bv/dev/mmux/prototype/test/run_tests.sh)",
+      "Bash(/home/bv/work/wct/noise/toolkit/test/bats/bin/bats --help)",
+      "Bash(cd *)",
+      "Bash(bd list *)",
+      "Bash(bd --help)",
+      "Bash(bd create *)"
+    ]
+  }
+}

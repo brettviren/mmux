@@ -1,0 +1,21 @@
+[project]
+name = "mmux"
+version = "0.1.0"
+description = "Add your description here"
+readme = {file = "README.org", content-type = "text/org"}
+authors = [
+    { name = "Brett Viren", email = "brett.viren@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "click>=8.4.1",
+    "pytest>=9.0.3",
+    "textual>=8.2.7",
+]
+
+[project.scripts]
+mmux = "mmux:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"

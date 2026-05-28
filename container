@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# @describe Manage the mmux development container
+
+IMAGE="mmux-dev"
+AUTH_VOLUME="mmux-claude-auth"
+
+# @cmd Build the container image from Containerfile
+build() {
+    local dir
+    dir="$(dirname "$(realpath "$0")")"
+    podman build -t "$IMAGE" -f "${dir}/Containerfile" "${dir}"
+}
+
+# @cmd Run the container (default: claude --dangerously-skip-permissions)
+# @arg args~  Command and args to run in the container instead of the default
+run() {
+    local args=("${argc_args[@]}")
+    # argc passthrough includes the '--' separator itself; strip it
+    [[ "${args[0]}" == "--" ]] && args=("${args[@]:1}")
+    local base=(
+        podman run --rm -it
+        -v "$(pwd):/workspace:z"
+        -v "${AUTH_VOLUME}:/home/user:z"
+        "$IMAGE"
+    )
+    if [[ ${#args[@]} -gt 0 ]]; then
+        "${base[@]}" "${args[@]}"
+    else
+        "${base[@]}"
+    fi
+}
+
+eval "$(argc --argc-eval "$0" "$@")"
