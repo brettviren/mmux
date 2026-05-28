@@ -19,6 +19,8 @@ run() {
     [[ "${args[0]}" == "--" ]] && args=("${args[@]:1}")
     local base=(
         podman run --rm -it
+        --userns=keep-id:uid=1000,gid=1000
+        -v mmux-venv:/workspace/.venv
         -v "$(pwd):/workspace:z"
         -v "${AUTH_VOLUME}:/home/user:z"
         "$IMAGE"
