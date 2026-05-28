@@ -30,7 +30,8 @@ async def test_line_stream_yields_stripped_lines():
     ]
     mock_proc = _make_mock_proc(payload)
 
-    with patch("mmux.queue.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+    with patch("mmux.queue._events_file_exists", return_value=True), \
+         patch("mmux.queue.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
         collected = []
         async for line in line_stream("user@host"):
             collected.append(line)
@@ -55,8 +56,23 @@ async def test_line_stream_yields_stripped_lines():
 async def test_line_stream_terminates_on_empty():
     mock_proc = _make_mock_proc([])
 
-    with patch("mmux.queue.asyncio.create_subprocess_exec", return_value=mock_proc):
+    with patch("mmux.queue._events_file_exists", return_value=True), \
+         patch("mmux.queue.asyncio.create_subprocess_exec", return_value=mock_proc):
         collected = [line async for line in line_stream("host")]
 
     assert collected == []
     mock_proc.terminate.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_line_stream_auto_installs_when_missing():
+    mock_proc = _make_mock_proc([])
+
+    with patch("mmux.queue._events_file_exists", return_value=False), \
+         patch("mmux.queue.asyncio.get_event_loop") as mock_loop, \
+         patch("mmux.queue.asyncio.create_subprocess_exec", return_value=mock_proc):
+        mock_loop.return_value.run_in_executor = AsyncMock(return_value=None)
+        collected = [line async for line in line_stream("host")]
+
+    mock_loop.return_value.run_in_executor.assert_called_once()
+    assert collected == []
