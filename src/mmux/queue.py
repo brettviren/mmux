@@ -12,10 +12,21 @@ async def _events_file_exists(target: str) -> bool:
         "ssh", "-o", "BatchMode=yes", "-T", target,
         "test", "-f", REMOTE_EVENTS_FILE,
         stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
-    await proc.wait()
+    _, stderr_bytes = await proc.communicate()
+    if stderr_bytes:
+        text = stderr_bytes.decode(errors="replace").strip()
+        if text:
+            log.debug("ssh(%s) test: %s", target, text)
     return proc.returncode == 0
+
+
+async def _drain_stderr(proc: asyncio.subprocess.Process, target: str) -> None:
+    async for line in proc.stderr:
+        text = line.decode(errors="replace").rstrip()
+        if text:
+            log.warning("ssh(%s): %s", target, text)
 
 
 async def line_stream(target: str) -> AsyncGenerator[bytes, None]:
@@ -28,11 +39,17 @@ async def line_stream(target: str) -> AsyncGenerator[bytes, None]:
         "ssh", "-o", "BatchMode=yes", target,
         "tail", "-f", "-n", "+1", REMOTE_EVENTS_FILE,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
+    stderr_task = asyncio.create_task(_drain_stderr(proc, target))
     try:
         async for line in proc.stdout:
             yield line.rstrip(b"\n")
     finally:
         proc.terminate()
         await proc.wait()
+        stderr_task.cancel()
+        try:
+            await stderr_task
+        except asyncio.CancelledError:
+            pass

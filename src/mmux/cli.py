@@ -1,19 +1,35 @@
 from __future__ import annotations
 import logging
+import os
+from pathlib import Path
 import click
+
+_DEFAULT_LOG_FILE = os.path.join(os.path.expanduser("~"), ".cache", "mmux.log")
 
 
 @click.group()
-@click.option("--debug", is_flag=True, help="Enable debug logging.")
+@click.option("--debug", is_flag=True, help="Enable debug logging (shorthand for -L debug).")
 @click.option("--config", "config_path", default=None, metavar="PATH",
               help="Config file (default: ~/.config/mmux/config.toml).")
+@click.option("-l", "--log-file", "log_file", default=_DEFAULT_LOG_FILE, metavar="PATH",
+              show_default=True, help="Log file path.")
+@click.option("-L", "--log-level", "log_level", default="info", metavar="LEVEL",
+              show_default=True, help="Logging level: debug, info, warning, error.")
 @click.pass_context
-def main(ctx: click.Context, debug: bool, config_path: str | None) -> None:
-    logging.basicConfig(level=logging.DEBUG if debug else logging.INFO,
-                        format="%(levelname)s %(message)s")
+def main(ctx: click.Context, debug: bool, config_path: str | None,
+         log_file: str, log_level: str) -> None:
+    level = logging.DEBUG if debug else getattr(logging, log_level.upper(), logging.INFO)
+    log_path = Path(log_file).expanduser()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        handlers=[logging.FileHandler(log_path)],
+    )
     from mmux.config import load
     ctx.ensure_object(dict)
     ctx.obj["cfg"] = load(config_path)
+    ctx.obj["log_file"] = str(log_path)
 
 
 @main.command()

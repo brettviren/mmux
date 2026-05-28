@@ -140,8 +140,11 @@ class SessionTree(Tree):
         cmd = ["ssh", "-t", d.host, f"tmux attach -t {d.session}"]
         if d.pane is not None:
             cmd[-1] += f" \\; select-pane -t {d.pane}"
+        log.info("attaching: %s", " ".join(cmd))
         with self.app.suspend():
-            subprocess.run(cmd)
+            result = subprocess.run(cmd)
+            if result.returncode != 0:
+                log.warning("attach exited with code %d", result.returncode)
 
 
 class MmuxApp(App):
