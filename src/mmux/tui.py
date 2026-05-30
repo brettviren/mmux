@@ -233,7 +233,7 @@ class MmuxApp(App):
                 keys = [k for k in self._pane_states if k[0] == target and k[1] == obj.session]
                 for k in keys:
                     self._pane_states[k].closed = True
-                self.call_from_thread(self._refresh_tree)
+                self._refresh_tree()
                 self.set_timer(5, lambda ks=keys: self._remove_keys(ks))
 
             elif isinstance(obj, PaneCreated):
@@ -242,13 +242,13 @@ class MmuxApp(App):
                     self._pane_states[key] = PaneState(target, obj.session, obj.window, obj.pane)
                 else:
                     self._pane_states[key].closed = False
-                self.call_from_thread(self._refresh_tree)
+                self._refresh_tree()
 
             elif isinstance(obj, PaneClosed):
                 key = (target, obj.session, obj.window, obj.pane)
                 if key in self._pane_states:
                     self._pane_states[key].closed = True
-                    self.call_from_thread(self._refresh_tree)
+                    self._refresh_tree()
                     self.set_timer(5, lambda k=key: self._remove_keys([k]))
 
             elif isinstance(obj, Activity):
@@ -256,17 +256,17 @@ class MmuxApp(App):
                 ps = self._pane_states.get(key) or PaneState(target, obj.session, obj.window, obj.pane)
                 ps.last_activity_ts = now
                 self._pane_states[key] = ps
-                self.call_from_thread(self._refresh_tree)
+                self._refresh_tree()
 
             elif isinstance(obj, Silence):
                 key = (target, obj.session, obj.window, obj.pane)
                 ps = self._pane_states.get(key) or PaneState(target, obj.session, obj.window, obj.pane)
                 ps.last_silence_ts = now
                 self._pane_states[key] = ps
-                self.call_from_thread(self._refresh_tree)
+                self._refresh_tree()
 
             elif isinstance(obj, Notification):
-                self.call_from_thread(self._handle_notification, target, obj.message, obj.session_id)
+                self._handle_notification(target, obj.message, obj.session_id)
 
     def _handle_notification(self, target: str, message: str, session_id: str) -> None:
         # Try to correlate session_id to a known pane
