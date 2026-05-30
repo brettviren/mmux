@@ -73,7 +73,32 @@ def _mmuxq_path(queue_path: str) -> str:
     return f"{queue_path}/queue"
 
 
-def install(target: str, queue_path: str = "~/.local/state/mmux") -> None:
+async def async_is_installed(target: str) -> bool:
+    """Return True if the mmuxq binary is present on *target*."""
+    from mmux import ssh as _ssh_mod
+    _, rc = await _ssh_mod.async_run(target, "test", "-f", "~/.local/bin/mmuxq")
+    return rc == 0
+
+
+async def async_is_running(target: str, queue_path: str = "~/.local/state/mmux") -> bool:
+    """Return True if the mmuxq dispatcher process is alive on *target*."""
+    from mmux import ssh as _ssh_mod
+    pid_file = f"{queue_path}/queue/dispatcher.pid"
+    _, rc = await _ssh_mod.async_run(
+        target, "bash", "-c",
+        f'pid=$(cat {pid_file} 2>/dev/null) && kill -0 "$pid" 2>/dev/null',
+    )
+    return rc == 0
+
+
+def start(target: str, queue_path: str = "~/.local/state/mmux") -> None:
+    """Start the mmuxq dispatcher on an already-installed *target*."""
+    qmp = f"{queue_path}/queue"
+    log.info("starting dispatcher on %s", target)
+    _ssh(target, f"~/.local/bin/mmuxq", "start", qmp, check=False)
+
+
+def install(target: str, queue_path: str = "~/.local/state/mmux", *, start_dispatcher: bool = True) -> None:
     qmp = f"{queue_path}/queue"
     mmuxq_local = str(Path(__file__).parent.parent.parent / "prototype" / "mmuxq")
 
@@ -129,8 +154,9 @@ def install(target: str, queue_path: str = "~/.local/state/mmux") -> None:
     _ssh(target, "touch", events_file)
 
     # 8. Start dispatcher (idempotent: mmuxq start warns if already running)
-    log.info("starting dispatcher on %s", target)
-    _ssh(target, f"~/.local/bin/mmuxq", "start", qmp, check=False)
+    if start_dispatcher:
+        log.info("starting dispatcher on %s", target)
+        _ssh(target, f"~/.local/bin/mmuxq", "start", qmp, check=False)
 
     # 9. Install tmux hooks
     log.info("installing tmux hooks on %s", target)

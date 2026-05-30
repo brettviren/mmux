@@ -142,6 +142,61 @@ _MOCK_DATA: list[PaneState] = [
 ]
 
 
+class MmuxqNotInstalledDialog(ModalScreen):
+    """Shown when the mmuxq binary is absent on the remote."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, remote: str) -> None:
+        super().__init__()
+        self._remote = remote
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog-box"):
+            yield Label(f"mmuxq is not installed on {self._remote}", classes="dialog-title")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Install and Start", variant="primary", id="btn-install-start")
+                yield Button("Just install", id="btn-install")
+                yield Button("Cancel", id="btn-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-install-start":
+            self.dismiss("install_and_start")
+        elif event.button.id == "btn-install":
+            self.dismiss("just_install")
+        else:
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class MmuxqNotRunningDialog(ModalScreen):
+    """Shown when mmuxq is installed but the dispatcher is not running."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, remote: str) -> None:
+        super().__init__()
+        self._remote = remote
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog-box"):
+            yield Label(f"mmuxq is not running on {self._remote}", classes="dialog-title")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Start", variant="primary", id="btn-start")
+                yield Button("Cancel", id="btn-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-start":
+            self.dismiss("start")
+        else:
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class AddTargetDialog(ModalScreen):
     """Dialog for adding a remote monitoring target."""
 
@@ -427,7 +482,8 @@ class MmuxApp(App):
     #notif-log.visible {
         display: block;
     }
-    AddTargetDialog, NewSessionDialog {
+    AddTargetDialog, NewSessionDialog,
+    MmuxqNotInstalledDialog, MmuxqNotRunningDialog {
         align: center middle;
     }
     .dialog-box {
@@ -572,6 +628,27 @@ class MmuxApp(App):
             PaneCreated, PaneClosed,
         )
         from mmux.protos.claude import Notification
+        from mmux.install import async_is_installed, async_is_running, install, start as _start
+
+        if not await async_is_installed(target):
+            action = await self.push_screen_wait(MmuxqNotInstalledDialog(target))
+            if action == "install_and_start":
+                await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: install(target, start_dispatcher=True)
+                )
+            elif action == "just_install":
+                await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: install(target, start_dispatcher=False)
+                )
+                return
+            else:
+                return
+        elif not await async_is_running(target):
+            action = await self.push_screen_wait(MmuxqNotRunningDialog(target))
+            if action == "start":
+                await asyncio.get_event_loop().run_in_executor(None, _start, target)
+            else:
+                return
 
         # Bootstrap initial pane state from tmux before blocking on the event stream.
         await self._fetch_pane_states(target)
