@@ -111,15 +111,17 @@ def start(target: str, queue_path: str = "~/.local/state/mmux") -> None:
     _ssh(target, "~/.local/bin/mmuxq", "start", qmp, check=False)
 
 
-def install(target: str, queue_path: str = "~/.local/state/mmux", *, start_dispatcher: bool = True) -> None:
+def install(target: str, queue_path: str = "~/.local/state/mmux", *,
+            start_dispatcher: bool = True, force: bool = False) -> None:
     qmp = f"{queue_path}/queue"
 
     # 1. Install the mmux package via uv (provides both mmux and mmuxq commands).
     log.info("running uv tool install on %s", target)
-    result = _ssh(
-        target, "uv", "tool", "install", "--upgrade", _MMUX_REPO,
-        check=False,
-    )
+    uv_args = ["uv", "tool", "install", "--upgrade"]
+    if force:
+        uv_args.append("--force")
+    uv_args.append(_MMUX_REPO)
+    result = _ssh(target, *uv_args, check=False)
     if result.returncode != 0:
         lines = "\n".join(
             line for line in (result.stdout + result.stderr).splitlines() if line.strip()

@@ -38,9 +38,12 @@ def main(ctx: click.Context, debug: bool, config_path: str | None,
 @main.command()
 @click.option("--queue-path", default=None, show_default=True,
               help="Base directory for mmux state on the remote host.")
+@click.option("--force", is_flag=True,
+              help="Pass --force to uv tool install (overwrites existing binaries).")
 @click.argument("targets", nargs=-1, required=True)
 @click.pass_context
-def install(ctx: click.Context, queue_path: str | None, targets: tuple[str, ...]) -> None:
+def install(ctx: click.Context, queue_path: str | None, force: bool,
+            targets: tuple[str, ...]) -> None:
     """Install mmux on one or more remote TARGETS via uv tool install."""
     from mmux.install import install as do_install
     cfg = ctx.obj["cfg"]
@@ -48,7 +51,7 @@ def install(ctx: click.Context, queue_path: str | None, targets: tuple[str, ...]
     for target in targets:
         click.echo(f"Installing on {target} ...")
         try:
-            do_install(target, queue_path=qp)
+            do_install(target, queue_path=qp, force=force)
             click.echo(f"  Done: {target}")
         except RuntimeError as exc:
             click.echo(f"  Failed: {exc}")
