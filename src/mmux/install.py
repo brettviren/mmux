@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from pathlib import Path
 
 from mmux import ssh
 
@@ -99,8 +98,8 @@ def start(target: str, queue_path: str = "~/.local/state/mmux") -> None:
 
 
 def install(target: str, queue_path: str = "~/.local/state/mmux", *, start_dispatcher: bool = True) -> None:
+    import importlib.resources
     qmp = f"{queue_path}/queue"
-    mmuxq_local = str(Path(__file__).parent.parent.parent / "prototype" / "mmuxq")
 
     # 1. Check for existing install (idempotent: warn, not abort)
     result = _ssh(target, "test", "-f", f"{qmp}/dispatcher.pid", check=False)
@@ -110,7 +109,9 @@ def install(target: str, queue_path: str = "~/.local/state/mmux", *, start_dispa
     # 2. Copy mmuxq to ~/.local/bin/
     log.info("copying mmuxq to %s:~/.local/bin/mmuxq", target)
     _ssh(target, "mkdir", "-p", "~/.local/bin")
-    ssh.scp(mmuxq_local, f"{target}:~/.local/bin/mmuxq")
+    ref = importlib.resources.files("mmux").joinpath("mmuxq")
+    with importlib.resources.as_file(ref) as mmuxq_path:
+        ssh.scp(str(mmuxq_path), f"{target}:~/.local/bin/mmuxq")
     _ssh(target, "chmod", "+x", "~/.local/bin/mmuxq")
 
     # 3. Write helper scripts via SSH stdin

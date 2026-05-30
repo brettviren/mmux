@@ -4,10 +4,13 @@ import os
 from pathlib import Path
 import click
 
+from mmux._version import __version__
+
 _DEFAULT_LOG_FILE = os.path.join(os.path.expanduser("~"), ".cache", "mmux.log")
 
 
 @click.group()
+@click.version_option(version=__version__, prog_name="mmux")
 @click.option("--debug", is_flag=True, help="Enable debug logging (shorthand for -L debug).")
 @click.option("--config", "config_path", default=None, metavar="PATH",
               help="Config file (default: ~/.config/mmux/config.toml).")

@@ -1,6 +1,6 @@
 [project]
 name = "mmux"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Add your description here"
 readme = {file = "README.org", content-type = "text/org"}
 authors = [
@@ -15,7 +15,14 @@ dependencies = [
 
 [project.scripts]
 mmux = "mmux:main"
+mmuxq = "mmux._mmuxq:main"
 
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=61", "setuptools_scm"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+fallback_version = "0.0.0+unknown"
+
+[tool.setuptools.package-data]
+mmux = ["mmuxq"]
