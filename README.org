@@ -188,6 +188,43 @@ RHEL); omit it for Docker or non-SELinux hosts.
 
 ** CLI reference
 
+*** ~mmux container list~
+
+Print configured ~[container.*]~ sections (one line each, resolved values):
+
+#+begin_src
+$ mmux container list
+default   podman  -                      /run/mmux/pmp
+myapp     podman  myapp-home:/home/user  /run/mmux/pmp
+otherapp  docker  other-home:/home/other /run/mmux/pmp
+#+end_src
+
+Columns show the /resolved/ values (nick-specific merged over default).
+
+*** ~mmux container run NICK [ARGS...]~
+
+Run a container with the mmux volume mounts automatically injected:
+
+#+begin_src shell
+mmux container run myapp --rm -it myimage bash
+#+end_src
+
+expands to:
+
+#+begin_src shell
+podman run \
+  -v myapp-home:/home/user \
+  -v /home/bv/.local/state/mmux/queue/producers/0002/queue:/run/mmux/pmp:Z \
+  --rm -it myimage bash
+#+end_src
+
+The PMP path is read from the local ~claude.pmp~ file (provisioned by
+~mmux install localhost~).  If the PMP is not yet provisioned a warning is
+printed and only the home volume is mounted.  Any flags and arguments after
+~NICK~ are passed through unchanged to ~CLIENT run~.
+
+*** ~mmux container hooks~
+
 #+begin_src
 mmux container hooks [OPTIONS] [REMOTE ...]
 

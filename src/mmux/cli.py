@@ -211,6 +211,69 @@ def container_hooks(ctx: click.Context, nick: str, client: str | None,
             click.echo(f"  Failed on {target}: {exc}", err=True)
 
 
+@container.command("list")
+@click.pass_context
+def container_list(ctx: click.Context) -> None:
+    """List configured container sections with resolved settings."""
+    from mmux.config import resolve_container
+    cfg = ctx.obj["cfg"]
+    if not cfg.containers:
+        click.echo("No [container.*] sections configured.")
+        return
+    rows = []
+    for nick in sorted(cfg.containers):
+        r = resolve_container(cfg, nick)
+        home = f"{r.home_volume}:{r.home_mount}" if r.home_volume and r.home_mount else "-"
+        rows.append((nick, r.client, home, r.pmp_mount))
+    w_nick = max(len(r[0]) for r in rows)
+    w_client = max(len(r[1]) for r in rows)
+    w_home = max(len(r[2]) for r in rows)
+    for nick, client, home, pmp in rows:
+        click.echo(f"{nick:<{w_nick}}  {client:<{w_client}}  {home:<{w_home}}  {pmp}")
+
+
+@container.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@click.argument("nick")
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+@click.pass_context
+def container_run(ctx: click.Context, nick: str, args: tuple[str, ...]) -> None:
+    """Run a container with mmux volume mounts injected.
+
+    Resolves [container.NICK] from config, prepends the home-volume and PMP
+    volume flags, then exec's: CLIENT run <mmux-flags> [ARGS...]
+    """
+    import os
+    from mmux.config import resolve_container
+    from mmux.container import get_pmp_host_path
+    cfg = ctx.obj["cfg"]
+
+    if nick != "default" and nick not in cfg.containers:
+        click.echo(f"warning: no [container.{nick}] section found; using defaults only", err=True)
+
+    ccfg = resolve_container(cfg, nick)
+    if not ccfg.home_volume or not ccfg.home_mount:
+        raise click.UsageError(
+            f"home_volume and home_mount must be set in [container.{nick}] or [container.default]"
+        )
+
+    mmux_flags = ["-v", f"{ccfg.home_volume}:{ccfg.home_mount}"]
+    host_pmp = get_pmp_host_path("localhost", cfg.queue_path)
+    if host_pmp:
+        z_flag = ":Z" if ccfg.client == "podman" else ""
+        mmux_flags += ["-v", f"{host_pmp}:{ccfg.pmp_mount}{z_flag}"]
+    else:
+        click.echo(
+            f"warning: claude PMP not found locally; run 'mmux install localhost' first",
+            err=True,
+        )
+
+    cmd = [ccfg.client, "run"] + mmux_flags + list(args)
+    try:
+        os.execvp(ccfg.client, cmd)
+    except FileNotFoundError:
+        raise click.ClickException(f"{ccfg.client!r} not found in PATH")
+
+
 @main.command()
 @click.option("--active-secs", default=None, type=int,
               help="Seconds until a pane transitions from active to newly-silent.")
