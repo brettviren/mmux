@@ -1,8 +1,9 @@
 from __future__ import annotations
+import asyncio
 import logging
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, Tree, Static, RichLog
 from textual.widgets.tree import TreeNode
@@ -13,6 +14,8 @@ log = logging.getLogger(__name__)
 ACTIVE_SECS = 30
 SILENT_SECS = 300
 TIMER_INTERVAL = 10.0
+
+TMUX_PANE_FORMAT = "#{session_name}|#{window_index}|#{pane_index}|#{pane_last_activity}"
 
 
 @dataclass
@@ -58,8 +61,9 @@ def _ago(ts: float, now: float) -> str:
     return f"{diff // 3600}h ago"
 
 
-def _session_status(panes: list[PaneState], now: float) -> tuple[str, str]:
-    lights = [_status(ps, now) for ps in panes]
+def _session_status(panes: list[PaneState], now: float,
+                    active_secs: float = ACTIVE_SECS, silent_secs: float = SILENT_SECS) -> tuple[str, str]:
+    lights = [_status(ps, now, active_secs, silent_secs) for ps in panes]
     if any(l == "●" for l, _ in lights):
         return "●", "green"
     if any(l == "◎" for l, _ in lights):
@@ -67,8 +71,9 @@ def _session_status(panes: list[PaneState], now: float) -> tuple[str, str]:
     return "○", "white"
 
 
-def _pane_label(ps: PaneState, now: float) -> Text:
-    light, color = _status(ps, now)
+def _pane_label(ps: PaneState, now: float,
+                active_secs: float = ACTIVE_SECS, silent_secs: float = SILENT_SECS) -> Text:
+    light, color = _status(ps, now, active_secs, silent_secs)
     last_ts = max(ps.last_activity_ts, ps.last_silence_ts)
     t = Text()
     if ps.closed:
@@ -82,8 +87,9 @@ def _pane_label(ps: PaneState, now: float) -> Text:
     return t
 
 
-def _session_label(session: str, panes: list[PaneState], now: float, closed: bool = False) -> Text:
-    light, color = _session_status(panes, now) if panes else ("○", "white")
+def _session_label(session: str, panes: list[PaneState], now: float, closed: bool = False,
+                   active_secs: float = ACTIVE_SECS, silent_secs: float = SILENT_SECS) -> Text:
+    light, color = _session_status(panes, now, active_secs, silent_secs) if panes else ("○", "white")
     t = Text()
     if closed:
         t.append(f"▶ {session}  {light}", style="dim strike")
@@ -111,7 +117,8 @@ _MOCK_DATA: list[PaneState] = [
 class SessionTree(Tree):
     BINDINGS = [("enter", "attach", "Attach")]
 
-    def populate(self, states: list[PaneState]) -> None:
+    def populate(self, states: list[PaneState],
+                 active_secs: float = ACTIVE_SECS, silent_secs: float = SILENT_SECS) -> None:
         self.clear()
         now = _now()
         by_host: dict[str, dict[str, list[PaneState]]] = {}
@@ -122,11 +129,14 @@ class SessionTree(Tree):
             host_node = self.root.add(host, data=NodeData(host=host), expand=True)
             for session, panes in sorted(sessions.items()):
                 all_closed = all(p.closed for p in panes)
-                label = _session_label(session, [p for p in panes if not p.closed], now, closed=all_closed)
+                label = _session_label(
+                    session, [p for p in panes if not p.closed], now,
+                    closed=all_closed, active_secs=active_secs, silent_secs=silent_secs,
+                )
                 sess_node = host_node.add(label, data=NodeData(host=host, session=session), expand=True)
                 for ps in sorted(panes, key=lambda p: p.pane):
                     sess_node.add_leaf(
-                        _pane_label(ps, now),
+                        _pane_label(ps, now, active_secs, silent_secs),
                         data=NodeData(host=host, session=session, pane=ps.pane),
                     )
 
@@ -201,10 +211,51 @@ class MmuxApp(App):
             self.query_one(SessionTree).populate(_MOCK_DATA)
         for target in self.targets:
             self.run_worker(self._stream_target(target), exclusive=False)
-        self.set_interval(TIMER_INTERVAL, self._refresh_tree)
+        self.set_interval(TIMER_INTERVAL, self._on_timer)
+
+    def _on_timer(self) -> None:
+        for target in self.targets:
+            self.run_worker(
+                self._fetch_pane_states(target),
+                name=f"poll-{target}",
+                exclusive=True,
+            )
+        self._refresh_tree()
+
+    async def _fetch_pane_states(self, target: str) -> None:
+        """Query tmux list-panes directly for current activity timestamps."""
+        proc = await asyncio.create_subprocess_exec(
+            "ssh", "-o", "BatchMode=yes", target,
+            "tmux", "list-panes", "-a", "-F", TMUX_PANE_FORMAT,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode != 0:
+            log.debug("tmux list-panes on %s failed (rc=%d)", target, proc.returncode)
+            return
+        count = 0
+        for raw in stdout.decode(errors="replace").splitlines():
+            parts = raw.split("|")
+            if len(parts) != 4:
+                continue
+            session, window_s, pane_s, activity_s = parts
+            try:
+                window = int(window_s)
+                pane_num = int(pane_s)
+            except ValueError:
+                continue
+            key = (target, session, window, pane_num)
+            ps = self._pane_states.get(key) or PaneState(target, session, window, pane_num)
+            if activity_s.isdigit():
+                ps.last_activity_ts = float(activity_s)
+            self._pane_states[key] = ps
+            count += 1
+        log.debug("polled %d panes from %s", count, target)
+        if count:
+            self._refresh_tree()
 
     async def _stream_target(self, target: str, _backoff: float = 2.0) -> None:
-        import asyncio
         try:
             await self.__stream_target_inner(target)
         except Exception as exc:
@@ -226,8 +277,13 @@ class MmuxApp(App):
         )
         from mmux.protos.claude import Notification
 
+        # Bootstrap initial pane state from tmux before blocking on the event stream.
+        await self._fetch_pane_states(target)
+
+        log.debug("event stream started for %s", target)
         async for obj in events(target):
             now = _now()
+            log.debug("tui received %r from %s", obj, target)
 
             if isinstance(obj, SessionClosed):
                 keys = [k for k in self._pane_states if k[0] == target and k[1] == obj.session]
@@ -269,7 +325,6 @@ class MmuxApp(App):
                 self._handle_notification(target, obj.message, obj.session_id)
 
     def _handle_notification(self, target: str, message: str, session_id: str) -> None:
-        # Try to correlate session_id to a known pane
         matched_key: tuple | None = None
         for key, ps in self._pane_states.items():
             if key[0] == target and session_id and session_id in ps.session:
@@ -297,8 +352,12 @@ class MmuxApp(App):
         if self._pane_states:
             self._ever_had_real_data = True
         elif not self._ever_had_real_data:
-            return  # don't wipe mock data before any real events arrive
-        self.query_one(SessionTree).populate(list(self._pane_states.values()))
+            return  # don't wipe mock data before any real data arrives
+        self.query_one(SessionTree).populate(
+            list(self._pane_states.values()),
+            active_secs=self._active_secs,
+            silent_secs=self._silent_secs,
+        )
 
     def action_reconnect(self) -> None:
         self._pane_states.clear()

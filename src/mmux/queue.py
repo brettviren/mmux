@@ -35,15 +35,18 @@ async def line_stream(target: str) -> AsyncGenerator[bytes, None]:
         from mmux.install import install
         await asyncio.get_event_loop().run_in_executor(None, install, target)
 
+    log.debug("tail -f %s:%s (pid will follow)", target, REMOTE_EVENTS_FILE)
     proc = await asyncio.create_subprocess_exec(
         "ssh", "-o", "BatchMode=yes", target,
         "tail", "-f", "-n", "+1", REMOTE_EVENTS_FILE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+    log.debug("tail -f started (ssh pid %s)", proc.pid)
     stderr_task = asyncio.create_task(_drain_stderr(proc, target))
     try:
         async for line in proc.stdout:
+            log.debug("raw line from %s: %r", target, line[:120])
             yield line.rstrip(b"\n")
     finally:
         proc.terminate()

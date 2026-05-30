@@ -26,7 +26,9 @@ def parse_line(line: bytes | str) -> Any | None:
         return None
     fields = {k: v for k, v in data.items() if k not in ("proto", "schema")}
     try:
-        return cls(**fields)
+        obj = cls(**fields)
+        logging.debug("parsed event: %r", obj)
+        return obj
     except TypeError as e:
         logging.debug("dataclass mismatch for %s: %s", key, e)
         return None
