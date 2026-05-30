@@ -109,18 +109,12 @@ def status(ctx: click.Context, queue_path: str | None, targets: tuple[str, ...])
         else:
             disp = "stopped"
 
-        # Queue directory info: single round-trip returning "missing" or "<np> <nc>"
-        queue_raw = _ssh(
-            f'if [ -d {qmp} ]; then'
-            f'  np=$(find {qmp}/producers -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l);'
-            f'  nc=$(find {qmp}/consumers -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l);'
-            f'  echo "$np $nc";'
-            f'else echo missing; fi'
-        )
-        if queue_raw == "missing" or not queue_raw:
+        # Queue directory info
+        if _ssh(f"test -d {qmp} && echo yes") != "yes":
             queue = "missing"
         else:
-            np, nc = queue_raw.split()
+            np = _ssh(f"find {qmp}/producers -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' '") or "0"
+            nc = _ssh(f"find {qmp}/consumers -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' '") or "0"
             queue = f"{qmp} Np={np} Nc={nc}"
 
         # Pending messages
