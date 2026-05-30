@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# bump — increment the project version and create a signed release tag.
+#
+# Usage:
+#   bump           # patch bump: X.Y.Z → X.Y.(Z+1)
+#   bump X.Y.Z     # explicit version; must be a patch or minor bump from current
+set -euo pipefail
+
+cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
+
+# --- guard: worktree must be clean ---
+if ! git diff --quiet HEAD 2>/dev/null; then
+    echo "error: git worktree is dirty; commit or stash changes first" >&2
+    exit 1
+fi
+
+# --- current version from latest tag ---
+current=$(git describe --tags --abbrev=0 2>/dev/null) || {
+    echo "error: no git tags found; create an initial tag first" >&2
+    exit 1
+}
+current="${current#v}"   # tolerate a leading 'v'
+
+if [[ ! "$current" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "error: current tag '${current}' is not X.Y.Z format" >&2
+    exit 1
+fi
+
+IFS='.' read -r cur_major cur_minor cur_patch <<< "$current"
+
+# --- determine new version ---
+if [[ $# -eq 0 ]]; then
+    new_version="${cur_major}.${cur_minor}.$((cur_patch + 1))"
+else
+    new="${1#v}"
+    if [[ ! "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "error: '${1}' is not X.Y.Z format" >&2
+        exit 1
+    fi
+    IFS='.' read -r nv_major nv_minor nv_patch <<< "$new"
+
+    patch_bump=$((cur_patch + 1))
+    minor_bump=$((cur_minor + 1))
+
+    if   [[ $nv_major -eq $cur_major && $nv_minor -eq $cur_minor && $nv_patch -eq $patch_bump ]]; then
+        : # valid patch bump
+    elif [[ $nv_major -eq $cur_major && $nv_minor -eq $minor_bump  && $nv_patch -eq 0 ]]; then
+        : # valid minor bump
+    else
+        echo "error: '${new}' is not a valid bump from '${current}'" >&2
+        printf "  allowed: %d.%d.%d  (patch bump)\n" \
+            "$cur_major" "$cur_minor" "$patch_bump" >&2
+        printf "  allowed: %d.%d.0  (minor bump)\n" \
+            "$cur_major" "$minor_bump" >&2
+        exit 1
+    fi
+    new_version="$new"
+fi
+
+echo "Bumping ${current} → ${new_version}"
+
+# --- record version in pyproject.toml ---
+sed -i "s/fallback_version = \"[^\"]*\"/fallback_version = \"${new_version}\"/" pyproject.toml
+git add pyproject.toml
+git commit -m "chore: bump version to ${new_version}"
+
+# --- tag ---
+git tag -a "${new_version}" -m "Release ${new_version}"
+echo "Tagged ${new_version}"
