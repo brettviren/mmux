@@ -1,32 +1,35 @@
 FROM debian:bookworm-slim
 
-# BUN_INSTALL=/usr/local makes bun and its global packages land in /usr/local/bin
-ENV BUN_INSTALL=/usr/local
-ENV PATH="/usr/local/bin:$PATH"
-
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates git bash unzip sudo \
-    && rm -rf /var/lib/apt/lists/*
+   autoconf bash build-essential ca-certificates clang coreutils curl direnv emacs \
+   fd-find gfortran git gpg jq less llvm locales lsb-release man-db \
+   python-is-python3 python3 \
+   python3-click python3-setuptools python3-venv python3-yaml ripgrep sudo \
+   unzip wget zip zlib1g-dev \
+   && rm -rf /var/lib/apt/lists/*
 
-# bun (JS runtime / package manager) — installed to /usr/local/bin/bun
-RUN curl -fsSL https://bun.sh/install | bash
-
-# Claude Code CLI — global install lands in /usr/local/bin/claude (via BUN_INSTALL)
-RUN bun install -g @anthropic-ai/claude-code
-
-# uv (Python package manager) — installed to /usr/local/bin/uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR=/usr/local/bin sh
 
-# beads issue tracker (bd) — install via mise then copy binary to /usr/local/bin
-RUN curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh \
- && MISE_DATA_DIR=/opt/mise mise install --yes 'github:gastownhall/beads@latest' \
- && find /opt/mise/installs -maxdepth 3 -name "bd" -perm /111 -type f | head -1 \
-    | xargs -I{} install -m755 {} /usr/local/bin/bd
+# This should install into /usr/local/bin if writable.
+RUN curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 
-# Unprivileged user with passwordless sudo
+RUN set -e \
+   && VERSION=$(curl -fsSL https://downloads.claude.ai/claude-code-releases/latest) \
+   && PLATFORM=linux-x64 \
+   && curl -fsSL -o /usr/local/bin/claude \
+      "https://downloads.claude.ai/claude-code-releases/$VERSION/$PLATFORM/claude" \
+   && chmod +x /usr/local/bin/claude
+
+
+# claude won't --dangerously-skip-permissions running as root so we make a user.
+# Unprivileged user with passwordless sudo.
 RUN useradd -m -s /bin/bash user \
  && echo "user ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
 USER user
+
+ENV PATH="/home/user/.local/bin:${PATH}"
+# RUN curl -fsSL https://claude.ai/install.sh | bash
+
 WORKDIR /workspace
 CMD ["claude", "--dangerously-skip-permissions"]
