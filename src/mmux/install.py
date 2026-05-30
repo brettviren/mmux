@@ -2,9 +2,10 @@
 from __future__ import annotations
 import json
 import logging
-import subprocess
 import sys
 from pathlib import Path
+
+from mmux import ssh
 
 log = logging.getLogger(__name__)
 
@@ -64,9 +65,8 @@ CLAUDE_NOTIFICATION_HOOK = {
 }
 
 
-def _ssh(target: str, *cmd: str, input: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
-    args = ["ssh", "-o", "BatchMode=yes", "-T", target, *cmd]
-    return subprocess.run(args, input=input, capture_output=True, text=True, check=check)
+def _ssh(target: str, *cmd: str, input: str | None = None, check: bool = True):
+    return ssh.run(target, *cmd, input=input, check=check)
 
 
 def _mmuxq_path(queue_path: str) -> str:
@@ -85,10 +85,7 @@ def install(target: str, queue_path: str = "~/.local/state/mmux") -> None:
     # 2. Copy mmuxq to ~/.local/bin/
     log.info("copying mmuxq to %s:~/.local/bin/mmuxq", target)
     _ssh(target, "mkdir", "-p", "~/.local/bin")
-    subprocess.run(
-        ["scp", "-o", "BatchMode=yes", "-q", mmuxq_local, f"{target}:~/.local/bin/mmuxq"],
-        check=True,
-    )
+    ssh.scp(mmuxq_local, f"{target}:~/.local/bin/mmuxq")
     _ssh(target, "chmod", "+x", "~/.local/bin/mmuxq")
 
     # 3. Write helper scripts via SSH stdin

@@ -2,32 +2,16 @@ import asyncio
 import logging
 from collections.abc import AsyncGenerator
 
+from mmux import ssh
+
 log = logging.getLogger(__name__)
 
 REMOTE_EVENTS_FILE = "~/.local/state/mmux/events.jsonl"
 
 
 async def _events_file_exists(target: str) -> bool:
-    proc = await asyncio.create_subprocess_exec(
-        "ssh", "-o", "BatchMode=yes", "-T", target,
-        "test", "-f", REMOTE_EVENTS_FILE,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, stderr_bytes = await proc.communicate()
-    if stderr_bytes:
-        text = stderr_bytes.decode(errors="replace").strip()
-        if text:
-            log.debug("ssh(%s) test: %s", target, text)
-    return proc.returncode == 0
-
-
-async def _drain_stderr(proc: asyncio.subprocess.Process, target: str) -> None:
-    async for line in proc.stderr:
-        text = line.decode(errors="replace").rstrip()
-        if text:
-            log.warning("ssh(%s): %s", target, text)
+    _, rc = await ssh.async_run(target, "test", "-f", REMOTE_EVENTS_FILE)
+    return rc == 0
 
 
 async def line_stream(target: str) -> AsyncGenerator[bytes, None]:
@@ -36,28 +20,9 @@ async def line_stream(target: str) -> AsyncGenerator[bytes, None]:
         from mmux.install import install
         await asyncio.get_event_loop().run_in_executor(None, install, target)
 
-    log.debug("tail -f %s:%s (pid will follow)", target, REMOTE_EVENTS_FILE)
-    proc = await asyncio.create_subprocess_exec(
-        "ssh", "-o", "BatchMode=yes", target,
-        "tail", "-f", "-n", "+1", REMOTE_EVENTS_FILE,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    log.debug("tail -f started (ssh pid %s)", proc.pid)
-    stderr_task = asyncio.create_task(_drain_stderr(proc, target))
-    try:
-        async for line in proc.stdout:
-            log.debug("raw line from %s: %r", target, line[:120])
-            yield line.rstrip(b"\n")
-    finally:
-        proc.terminate()
-        try:
-            await asyncio.shield(proc.wait())
-        except (asyncio.CancelledError, Exception):
-            pass
-        stderr_task.cancel()
-        try:
-            await asyncio.shield(stderr_task)
-        except (asyncio.CancelledError, Exception):
-            pass
+    log.debug("tail -f %s:%s", target, REMOTE_EVENTS_FILE)
+    async for line in ssh.async_stream(
+        target, "tail", "-f", "-n", "+1", REMOTE_EVENTS_FILE
+    ):
+        log.debug("raw line from %s: %r", target, line[:120])
+        yield line

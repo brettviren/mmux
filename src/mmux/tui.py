@@ -1,11 +1,14 @@
 from __future__ import annotations
 import asyncio
 import logging
-import subprocess
+import shlex
 import time
+from mmux import ssh
 from dataclasses import dataclass
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Tree, Static, RichLog
+from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
+from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static, Tree
 from textual.widgets.tree import TreeNode
 from rich.text import Text
 
@@ -105,6 +108,17 @@ def _session_label(session: str, panes: list[PaneState], now: float, closed: boo
     return t
 
 
+def _parse_target_spec(spec: str) -> tuple[str, str | None]:
+    """Parse 'user@host' or 'user@host:session' -> (ssh_host, session_or_None)."""
+    at_idx = spec.find("@")
+    if at_idx >= 0:
+        rest = spec[at_idx + 1:]
+        colon_idx = rest.find(":")
+        if colon_idx >= 0:
+            return spec[:at_idx + 1 + colon_idx], rest[colon_idx + 1:] or None
+    return spec, None
+
+
 _now = time.time
 _MOCK_NOW = _now()
 
@@ -126,6 +140,93 @@ _MOCK_DATA: list[PaneState] = [
     PaneState("user@host2", "debug", 0, 1, last_activity_ts=_MOCK_NOW - 15,
               current_path="/srv/app/src", current_command="bash"),
 ]
+
+
+class AddTargetDialog(ModalScreen):
+    """Dialog for adding a remote monitoring target."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog-box"):
+            yield Label("Add remote target", classes="dialog-title")
+            yield Label("Format: user@host or user@host:session-name", classes="dialog-field-label")
+            yield Input(id="target-input")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Add", variant="primary", id="btn-add")
+                yield Button("Attach", id="btn-attach")
+                yield Button("Cancel", id="btn-cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#target-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._do_add()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-add":
+            self._do_add()
+        elif event.button.id == "btn-attach":
+            self._do_attach()
+        elif event.button.id == "btn-cancel":
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _spec(self) -> str:
+        return self.query_one("#target-input", Input).value.strip()
+
+    def _do_add(self) -> None:
+        self.dismiss(("add", self._spec()) if self._spec() else None)
+
+    def _do_attach(self) -> None:
+        self.dismiss(("attach", self._spec()) if self._spec() else None)
+
+
+class NewSessionDialog(ModalScreen):
+    """Dialog for launching a new tmux session."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog-box"):
+            yield Label("New tmux session", classes="dialog-title")
+            yield Label("Remote (blank = local)", classes="dialog-field-label")
+            yield Input(id="remote-input")
+            yield Label("Session name (blank = auto-generated)", classes="dialog-field-label")
+            yield Input(id="session-input")
+            yield Label("Command (blank = $SHELL)", classes="dialog-field-label")
+            yield Input(id="command-input")
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Launch", variant="primary", id="btn-launch")
+                yield Button("Cancel", id="btn-cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#remote-input", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "remote-input":
+            self.query_one("#session-input", Input).focus()
+        elif event.input.id == "session-input":
+            self.query_one("#command-input", Input).focus()
+        else:
+            self._do_launch()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-launch":
+            self._do_launch()
+        elif event.button.id == "btn-cancel":
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _do_launch(self) -> None:
+        remote = self.query_one("#remote-input", Input).value.strip()
+        session = self.query_one("#session-input", Input).value.strip()
+        command = self.query_one("#command-input", Input).value.strip()
+        self.dismiss((remote, session, command))
 
 
 class SessionTree(Tree):
@@ -285,14 +386,14 @@ class SessionTree(Tree):
         d: NodeData = node.data
         if d.session is None:
             return
-        cmd = ["ssh", "-t", d.host, f"tmux attach -t {d.session}"]
+        remote_cmd = f"tmux attach -t {d.session}"
         if d.pane is not None:
-            cmd[-1] += f" \\; select-pane -t {d.pane}"
-        log.info("attaching: %s", " ".join(cmd))
+            remote_cmd += f" \\; select-pane -t {d.pane}"
+        log.info("attaching: ssh -t %s %s", d.host, remote_cmd)
         with self.app.suspend():
-            result = subprocess.run(cmd)
-            if result.returncode != 0:
-                log.warning("attach exited with code %d", result.returncode)
+            rc = ssh.attach(d.host, remote_cmd)
+            if rc != 0:
+                log.warning("attach exited with code %d", rc)
 
 
 class MmuxApp(App):
@@ -300,6 +401,8 @@ class MmuxApp(App):
         ("q", "quit", "Quit"),
         ("r", "reconnect", "Reconnect"),
         ("l", "toggle_log", "Log"),
+        ("a", "add", "Add"),
+        ("n", "new", "New"),
     ]
 
     CSS = """
@@ -324,6 +427,33 @@ class MmuxApp(App):
     #notif-log.visible {
         display: block;
     }
+    AddTargetDialog, NewSessionDialog {
+        align: center middle;
+    }
+    .dialog-box {
+        width: 64;
+        height: auto;
+        background: $surface;
+        border: thick $primary;
+        padding: 1 2;
+    }
+    .dialog-title {
+        text-align: center;
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    .dialog-field-label {
+        margin-top: 1;
+        color: $text-muted;
+    }
+    .dialog-buttons {
+        margin-top: 1;
+        height: auto;
+        align: center middle;
+    }
+    .dialog-buttons Button {
+        margin: 0 1;
+    }
     """
 
     def __init__(self, targets: list[str] | None = None,
@@ -333,6 +463,7 @@ class MmuxApp(App):
         super().__init__(**kwargs)
         self.targets = targets or ["localhost"]
         self._pane_states: dict[tuple[str, str, int, int], PaneState] = {}
+        self._session_filters: dict[str, str] = {}  # ssh_host -> session name to show
         self._active_secs = active_secs
         self._silent_secs = silent_secs
         self._ever_had_real_data = False
@@ -390,16 +521,11 @@ class MmuxApp(App):
         """Query tmux list-panes directly for current activity timestamps."""
         # Pass as a single string so the remote shell doesn't interpret the
         # | separators in TMUX_PANE_FORMAT as pipes.
-        proc = await asyncio.create_subprocess_exec(
-            "ssh", "-o", "BatchMode=yes", target,
-            f"tmux list-panes -a -F '{TMUX_PANE_FORMAT}'",
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+        stdout, rc = await ssh.async_run(
+            target, f"tmux list-panes -a -F '{TMUX_PANE_FORMAT}'"
         )
-        stdout, _ = await proc.communicate()
-        if proc.returncode != 0:
-            log.debug("tmux list-panes on %s failed (rc=%d)", target, proc.returncode)
+        if rc != 0:
+            log.debug("tmux list-panes on %s failed (rc=%d)", target, rc)
             return
         count = 0
         for raw in stdout.decode(errors="replace").splitlines():
@@ -530,8 +656,15 @@ class MmuxApp(App):
         tree = self.query_one(SessionTree)
         if self._pane_states:
             self._ever_had_real_data = True
+            states = list(self._pane_states.values())
+            if self._session_filters:
+                states = [
+                    ps for ps in states
+                    if ps.host not in self._session_filters
+                    or ps.session == self._session_filters[ps.host]
+                ]
             tree.populate(
-                list(self._pane_states.values()),
+                states,
                 active_secs=self._active_secs,
                 silent_secs=self._silent_secs,
             )
@@ -551,6 +684,78 @@ class MmuxApp(App):
             log.remove_class("visible")
         else:
             log.add_class("visible")
+
+    def action_add(self) -> None:
+        def handle(result: tuple[str, str] | None) -> None:
+            if result is None:
+                return
+            action, spec = result
+            host, session_filter = _parse_target_spec(spec)
+            if host not in self.targets:
+                self.targets.append(host)
+                if session_filter:
+                    self._session_filters[host] = session_filter
+                self.run_worker(self._stream_target(host), exclusive=False)
+            if action == "attach":
+                self._attach_to(host, session_filter)
+
+        self.push_screen(AddTargetDialog(), handle)
+
+    def _attach_to(self, host: str, session: str | None) -> None:
+        remote_cmd = "tmux attach" + (f" -t {session}" if session else "")
+        log.info("attaching: ssh -t %s %s", host, remote_cmd)
+        with self.suspend():
+            rc = ssh.attach(host, remote_cmd)
+            if rc != 0:
+                log.warning("attach exited with code %d", rc)
+
+    def action_new(self) -> None:
+        def handle(result: tuple[str, str, str] | None) -> None:
+            if result is None:
+                return
+            remote, session_name, command = result
+            self.run_worker(
+                self._launch_session(remote, session_name, command),
+                exclusive=False,
+            )
+
+        self.push_screen(NewSessionDialog(), handle)
+
+    async def _launch_session(self, remote: str, session_name: str, command: str) -> None:
+        tmux_cmd = ["tmux", "new-session", "-d"]
+        if session_name:
+            tmux_cmd += ["-s", session_name]
+        if command:
+            tmux_cmd.append(command)
+
+        if remote:
+            _, rc = await ssh.async_run(remote, shlex.join(tmux_cmd))
+            if rc != 0:
+                log.warning("new-session failed on %s (rc=%d)", remote, rc)
+                return
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                *tmux_cmd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                log.warning("new-session failed (rc=%d): %s",
+                            proc.returncode, stderr.decode(errors="replace").strip())
+                return
+
+        target = remote or "localhost"
+        if target not in self.targets:
+            self.targets.append(target)
+            self.run_worker(self._stream_target(target), exclusive=False)
+        else:
+            self.run_worker(
+                self._fetch_pane_states(target),
+                name=f"poll-{target}",
+                exclusive=True,
+            )
 
 
 def run() -> None:
