@@ -294,8 +294,10 @@ Each ~[container.<nick>]~ section supports:
 ~home_volume~ and ~home_mount~ are required (from config or CLI flags) for
 ~mmux container hooks~ and ~mmux container run~ to work.
 
-~run_args~ is split with shell quoting rules (~shlex~), so quoted strings
-with spaces are handled correctly.
+~run_args~ is passed as a raw shell fragment, so shell expansions such as
+~$(pwd)~ and ~$HOME~ are evaluated at run time.  The mmux-generated parts
+(volume flags, image name, command-line arguments) are properly quoted
+before being combined with ~run_args~ into the final shell command.
 
 * Status Indicators
 

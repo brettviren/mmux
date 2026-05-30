@@ -270,16 +270,23 @@ def container_run(ctx: click.Context, nick: str, args: tuple[str, ...]) -> None:
             err=True,
         )
 
-    extra = shlex.split(ccfg.run_args) if ccfg.run_args else []
-    image = [ccfg.image] if ccfg.image else []
-    cmd = [ccfg.client, "run"] + mmux_flags + extra + image + list(args)
-    log.debug("container run: %s", " ".join(cmd))
+    # Build a shell command string so that run_args can contain shell expansions
+    # such as $(pwd).  mmux-generated parts are quoted; run_args is kept raw.
+    shell_parts = [shlex.quote(ccfg.client), "run"]
+    shell_parts += [shlex.quote(f) for f in mmux_flags]
+    if ccfg.run_args:
+        shell_parts.append(ccfg.run_args)
+    if ccfg.image:
+        shell_parts.append(shlex.quote(ccfg.image))
+    shell_parts += [shlex.quote(a) for a in args]
+    shell_cmd = " ".join(shell_parts)
+    log.debug("container run: %s", shell_cmd)
     for h in logging.getLogger().handlers:
         h.flush()
     try:
-        os.execvp(ccfg.client, cmd)
+        os.execvp("sh", ["sh", "-c", shell_cmd])
     except FileNotFoundError:
-        raise click.ClickException(f"{ccfg.client!r} not found in PATH")
+        raise click.ClickException("'sh' not found in PATH")
 
 
 @main.command()
