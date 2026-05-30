@@ -1,10 +1,13 @@
 from __future__ import annotations
 import logging
 import os
+import shlex
 from pathlib import Path
 import click
 
 from mmux._version import __version__
+
+log = logging.getLogger(__name__)
 
 _DEFAULT_LOG_FILE = os.path.join(os.path.expanduser("~"), ".cache", "mmux.log")
 
@@ -263,11 +266,15 @@ def container_run(ctx: click.Context, nick: str, args: tuple[str, ...]) -> None:
         mmux_flags += ["-v", f"{host_pmp}:{ccfg.pmp_mount}{z_flag}"]
     else:
         click.echo(
-            f"warning: claude PMP not found locally; run 'mmux install localhost' first",
+            "warning: claude PMP not found locally; run 'mmux install localhost' first",
             err=True,
         )
 
-    cmd = [ccfg.client, "run"] + mmux_flags + list(args)
+    extra = shlex.split(ccfg.run_args) if ccfg.run_args else []
+    cmd = [ccfg.client, "run"] + mmux_flags + extra + list(args)
+    log.debug("container run: %s", " ".join(cmd))
+    for h in logging.getLogger().handlers:
+        h.flush()
     try:
         os.execvp(ccfg.client, cmd)
     except FileNotFoundError:

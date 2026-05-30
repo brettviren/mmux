@@ -17,6 +17,7 @@ class ContainerConfig:
     pmp_mount: str = ""
     home_volume: str = ""
     home_mount: str = ""
+    run_args: str = ""
 
 
 @dataclass
@@ -37,6 +38,7 @@ def resolve_container(cfg: MmuxConfig, nick: str) -> ContainerConfig:
         pmp_mount=named.pmp_mount or default.pmp_mount or "/run/mmux/pmp",
         home_volume=named.home_volume or default.home_volume,
         home_mount=named.home_mount or default.home_mount,
+        run_args=named.run_args or default.run_args,
     )
 
 
@@ -66,6 +68,8 @@ def save(cfg: MmuxConfig, path: str | Path | None = None) -> Path:
             lines.append(f'home_volume = "{ccfg.home_volume}"\n')
         if ccfg.home_mount:
             lines.append(f'home_mount = "{ccfg.home_mount}"\n')
+        if ccfg.run_args:
+            lines.append(f'run_args = "{ccfg.run_args}"\n')
     for t in cfg.targets:
         lines.append("\n[[targets]]\n")
         lines.append(f'host = "{t.host}"\n')
@@ -90,6 +94,7 @@ def load(path: str | Path | None = None) -> MmuxConfig:
             pmp_mount=c.get("pmp_mount", ""),
             home_volume=c.get("home_volume", ""),
             home_mount=c.get("home_mount", ""),
+            run_args=c.get("run_args", ""),
         )
         for nick, c in raw.get("container", {}).items()
     }

@@ -69,6 +69,7 @@ def prime_hooks(
         container, "bash", "-s",
     ]
     log.info("priming container %s on %s", container, target)
+    log.debug("prime cmd: %s", " ".join(cmd))
     if target == "localhost":
         result = subprocess.run(cmd, input=script, capture_output=True, text=True, check=False)
         if result.returncode != 0:
