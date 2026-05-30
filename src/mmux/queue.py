@@ -47,9 +47,12 @@ async def line_stream(target: str) -> AsyncGenerator[bytes, None]:
             yield line.rstrip(b"\n")
     finally:
         proc.terminate()
-        await proc.wait()
+        try:
+            await asyncio.shield(proc.wait())
+        except (asyncio.CancelledError, Exception):
+            pass
         stderr_task.cancel()
         try:
-            await stderr_task
-        except asyncio.CancelledError:
+            await asyncio.shield(stderr_task)
+        except (asyncio.CancelledError, Exception):
             pass

@@ -43,6 +43,8 @@ printf '%s\n' "$json" > "$pmp/$fname"
 """
 
 TMUX_HOOKS = """\
+set-window-option -g monitor-activity on
+set-window-option -g monitor-silence 30
 set-hook -g alert-activity    "run-shell '~/.local/bin/mmux-hook tmux Activity   session=#{session_name} window=#{window_index} pane=#{pane_index}'"
 set-hook -g alert-silence     "run-shell '~/.local/bin/mmux-hook tmux Silence    session=#{session_name} window=#{window_index} pane=#{pane_index}'"
 set-hook -g session-created   "run-shell '~/.local/bin/mmux-hook tmux SessionCreated  session=#{session_name}'"
