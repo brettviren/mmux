@@ -15,7 +15,7 @@ ACTIVE_SECS = 30
 SILENT_SECS = 300
 TIMER_INTERVAL = 10.0
 
-TMUX_PANE_FORMAT = "#{session_name}|#{window_index}|#{pane_index}|#{pane_last_activity}"
+TMUX_PANE_FORMAT = "#{session_name}|#{window_index}|#{pane_index}|#{window_activity}"
 
 
 @dataclass
@@ -224,9 +224,11 @@ class MmuxApp(App):
 
     async def _fetch_pane_states(self, target: str) -> None:
         """Query tmux list-panes directly for current activity timestamps."""
+        # Pass as a single string so the remote shell doesn't interpret the
+        # | separators in TMUX_PANE_FORMAT as pipes.
         proc = await asyncio.create_subprocess_exec(
             "ssh", "-o", "BatchMode=yes", target,
-            "tmux", "list-panes", "-a", "-F", TMUX_PANE_FORMAT,
+            f"tmux list-panes -a -F '{TMUX_PANE_FORMAT}'",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -285,7 +287,14 @@ class MmuxApp(App):
             now = _now()
             log.debug("tui received %r from %s", obj, target)
 
-            if isinstance(obj, SessionClosed):
+            if isinstance(obj, SessionCreated):
+                self.run_worker(
+                    self._fetch_pane_states(target),
+                    name=f"poll-{target}",
+                    exclusive=True,
+                )
+
+            elif isinstance(obj, SessionClosed):
                 keys = [k for k in self._pane_states if k[0] == target and k[1] == obj.session]
                 for k in keys:
                     self._pane_states[k].closed = True

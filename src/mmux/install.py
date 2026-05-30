@@ -16,11 +16,15 @@ pmp="$(cat "$pmp_file" 2>/dev/null)" || exit 0
 ts="$(date -u +%FT%T.%3NZ)"
 json=$(python3 -c "
 import sys, json
+_INT_KEYS = {'window', 'pane'}
 d={'proto':'$proto','schema':'$schema','ts':'$ts'}
 for kv in sys.argv[1:]:
     k,_,v=kv.partition('=')
-    try: d[k]=int(v)
-    except ValueError: d[k]=v
+    if k in _INT_KEYS:
+        try: d[k]=int(v)
+        except ValueError: d[k]=v
+    else:
+        d[k]=v
 print(json.dumps(d))
 " "$@")
 fname="${ts//[:.]}$$"
