@@ -11,6 +11,7 @@ async def _events_file_exists(target: str) -> bool:
     proc = await asyncio.create_subprocess_exec(
         "ssh", "-o", "BatchMode=yes", "-T", target,
         "test", "-f", REMOTE_EVENTS_FILE,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -39,6 +40,7 @@ async def line_stream(target: str) -> AsyncGenerator[bytes, None]:
     proc = await asyncio.create_subprocess_exec(
         "ssh", "-o", "BatchMode=yes", target,
         "tail", "-f", "-n", "+1", REMOTE_EVENTS_FILE,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

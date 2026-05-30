@@ -15,7 +15,7 @@ ACTIVE_SECS = 30
 SILENT_SECS = 300
 TIMER_INTERVAL = 10.0
 
-TMUX_PANE_FORMAT = "#{session_name}|#{window_index}|#{pane_index}|#{window_activity}"
+TMUX_PANE_FORMAT = "#{session_name}|#{window_index}|#{pane_index}|#{window_activity}|#{pane_current_path}|#{pane_current_command}"
 
 
 @dataclass
@@ -28,6 +28,8 @@ class PaneState:
     last_silence_ts: float = 0.0
     closed: bool = False
     notification: str | None = None
+    current_path: str = ""
+    current_command: str = ""
 
 
 @dataclass
@@ -82,6 +84,10 @@ def _pane_label(ps: PaneState, now: float,
         t.append(f"pane {ps.pane}  ")
         t.append(light, style=color)
         t.append(f"  {_ago(last_ts, now)}", style="dim")
+        if ps.current_command:
+            t.append(f"  {ps.current_command}", style="bold")
+        if ps.current_path:
+            t.append(f"  {ps.current_path}", style="dim")
         if ps.notification:
             t.append("  [!]", style="bold magenta")
     return t
@@ -103,42 +109,174 @@ _now = time.time
 _MOCK_NOW = _now()
 
 _MOCK_DATA: list[PaneState] = [
-    PaneState("user@host1", "main", 0, 0, last_activity_ts=_MOCK_NOW - 10),
-    PaneState("user@host1", "main", 0, 1, last_silence_ts=_MOCK_NOW - 5),
-    PaneState("user@host1", "work", 0, 0, last_activity_ts=_MOCK_NOW - 500),
-    PaneState("user@host1", "work", 0, 1, last_activity_ts=_MOCK_NOW - 480),
-    PaneState("user@host2", "build", 0, 0, last_silence_ts=_MOCK_NOW - 90),
-    PaneState("user@host2", "build", 0, 1, last_activity_ts=_MOCK_NOW - 600),
-    PaneState("user@host2", "debug", 0, 0, last_activity_ts=_MOCK_NOW - 5),
-    PaneState("user@host2", "debug", 0, 1, last_activity_ts=_MOCK_NOW - 15),
+    PaneState("user@host1", "main", 0, 0, last_activity_ts=_MOCK_NOW - 10,
+              current_path="/home/user", current_command="bash"),
+    PaneState("user@host1", "main", 0, 1, last_silence_ts=_MOCK_NOW - 5,
+              current_path="/home/user/project", current_command="vim"),
+    PaneState("user@host1", "work", 0, 0, last_activity_ts=_MOCK_NOW - 500,
+              current_path="/home/user/work", current_command="python"),
+    PaneState("user@host1", "work", 0, 1, last_activity_ts=_MOCK_NOW - 480,
+              current_path="/home/user/work/tests", current_command="pytest"),
+    PaneState("user@host2", "build", 0, 0, last_silence_ts=_MOCK_NOW - 90,
+              current_path="/srv/app", current_command="make"),
+    PaneState("user@host2", "build", 0, 1, last_activity_ts=_MOCK_NOW - 600,
+              current_path="/srv/app/src", current_command="bash"),
+    PaneState("user@host2", "debug", 0, 0, last_activity_ts=_MOCK_NOW - 5,
+              current_path="/srv/app", current_command="gdb"),
+    PaneState("user@host2", "debug", 0, 1, last_activity_ts=_MOCK_NOW - 15,
+              current_path="/srv/app/src", current_command="bash"),
 ]
 
 
 class SessionTree(Tree):
-    BINDINGS = [("enter", "attach", "Attach")]
+    BINDINGS = [
+        ("enter", "attach", "Attach"),
+        ("tab", "toggle_node", "Toggle"),
+    ]
+
+    show_root = False
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._collapsed: set[tuple] = set()
+        self._tree_structure: frozenset = frozenset()
+        # maps (host, session|None, pane|None) -> TreeNode for label-only updates
+        self._node_map: dict[tuple, TreeNode] = {}
+
+    def _node_key(self, node: TreeNode) -> tuple | None:
+        """Return a stable key for a node, or None if it's a leaf (un-togglable)."""
+        if node is self.root:
+            return ()
+        d: NodeData | None = node.data
+        if d is None:
+            return None
+        if d.session is None:
+            return (d.host,)
+        if d.pane is None:
+            return (d.host, d.session)
+        return None  # pane leaves have no children to toggle
+
+    def action_cursor_up(self) -> None:
+        log.debug("cursor_up  before: line=%d focus=%s", self.cursor_line, self.has_focus)
+        super().action_cursor_up()
+        log.debug("cursor_up  after:  line=%d", self.cursor_line)
+
+    def action_cursor_down(self) -> None:
+        log.debug("cursor_down before: line=%d focus=%s", self.cursor_line, self.has_focus)
+        super().action_cursor_down()
+        log.debug("cursor_down after:  line=%d", self.cursor_line)
+
+    def action_toggle_node(self) -> None:
+        node = self.cursor_node
+        if node is None:
+            return
+        key = self._node_key(node)
+        if key is None:
+            return
+        if key in self._collapsed:
+            self._collapsed.discard(key)
+            node.expand()
+        else:
+            self._collapsed.add(key)
+            node.collapse()
 
     def populate(self, states: list[PaneState],
                  active_secs: float = ACTIVE_SECS, silent_secs: float = SILENT_SECS) -> None:
+        new_structure = frozenset((ps.host, ps.session, ps.pane) for ps in states)
+        if new_structure == self._tree_structure and self._node_map:
+            # Structure unchanged: update labels in-place, cursor untouched.
+            self._update_labels(states, active_secs, silent_secs)
+            return
+
+        self._tree_structure = new_structure
+        self._node_map.clear()
+
+        # Save cursor before the structural rebuild.
+        cursor_key: tuple | None = None
+        cn = self.cursor_node
+        if cn is not None and cn is not self.root and cn.data is not None:
+            d: NodeData = cn.data
+            cursor_key = (d.host, d.session, d.pane)
+
         self.clear()
+        if () in self._collapsed:
+            self.root.collapse()
+        else:
+            self.root.expand()
         now = _now()
         by_host: dict[str, dict[str, list[PaneState]]] = {}
         for ps in states:
             by_host.setdefault(ps.host, {}).setdefault(ps.session, []).append(ps)
 
+        cursor_target: TreeNode | None = None
+
         for host, sessions in sorted(by_host.items()):
-            host_node = self.root.add(host, data=NodeData(host=host), expand=True)
+            host_node = self.root.add(
+                host, data=NodeData(host=host),
+                expand=(host,) not in self._collapsed,
+            )
+            self._node_map[(host, None, None)] = host_node
+            if cursor_key == (host, None, None):
+                cursor_target = host_node
             for session, panes in sorted(sessions.items()):
                 all_closed = all(p.closed for p in panes)
                 label = _session_label(
                     session, [p for p in panes if not p.closed], now,
                     closed=all_closed, active_secs=active_secs, silent_secs=silent_secs,
                 )
-                sess_node = host_node.add(label, data=NodeData(host=host, session=session), expand=True)
+                sess_node = host_node.add(
+                    label, data=NodeData(host=host, session=session),
+                    expand=(host, session) not in self._collapsed,
+                )
+                self._node_map[(host, session, None)] = sess_node
+                if cursor_key == (host, session, None):
+                    cursor_target = sess_node
                 for ps in sorted(panes, key=lambda p: p.pane):
-                    sess_node.add_leaf(
+                    leaf = sess_node.add_leaf(
                         _pane_label(ps, now, active_secs, silent_secs),
                         data=NodeData(host=host, session=session, pane=ps.pane),
                     )
+                    self._node_map[(host, session, ps.pane)] = leaf
+                    if cursor_key == (host, session, ps.pane):
+                        cursor_target = leaf
+
+        if cursor_target is not None:
+            self.move_cursor(cursor_target)
+
+    def _update_labels(self, states: list[PaneState],
+                       active_secs: float = ACTIVE_SECS, silent_secs: float = SILENT_SECS) -> None:
+        """Update node labels in-place without touching tree structure or cursor.
+
+        Writes _label/_updates directly to avoid set_label's call_later(), which
+        would post Callback messages into the pump and interleave with key events.
+        A single self.refresh() at the end triggers one repaint instead of N.
+        """
+        now = _now()
+        by_host: dict[str, dict[str, list[PaneState]]] = {}
+        for ps in states:
+            by_host.setdefault(ps.host, {}).setdefault(ps.session, []).append(ps)
+        changed = False
+        for host, sessions in by_host.items():
+            for session, panes in sessions.items():
+                all_closed = all(p.closed for p in panes)
+                sess_node = self._node_map.get((host, session, None))
+                if sess_node is not None:
+                    sess_node._label = self.process_label(_session_label(
+                        session, [p for p in panes if not p.closed], now,
+                        closed=all_closed, active_secs=active_secs, silent_secs=silent_secs,
+                    ))
+                    sess_node._updates += 1
+                    changed = True
+                for ps in panes:
+                    pane_node = self._node_map.get((host, session, ps.pane))
+                    if pane_node is not None:
+                        pane_node._label = self.process_label(
+                            _pane_label(ps, now, active_secs, silent_secs)
+                        )
+                        pane_node._updates += 1
+                        changed = True
+        if changed:
+            self.refresh()
 
     def action_attach(self) -> None:
         node = self.cursor_node
@@ -198,6 +336,7 @@ class MmuxApp(App):
         self._active_secs = active_secs
         self._silent_secs = silent_secs
         self._ever_had_real_data = False
+        self._last_display_refresh: float = 0.0
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -209,18 +348,43 @@ class MmuxApp(App):
     def on_mount(self) -> None:
         if self.targets == ["localhost"] and not self._pane_states:
             self.query_one(SessionTree).populate(_MOCK_DATA)
+            self._last_display_refresh = _now()
         for target in self.targets:
             self.run_worker(self._stream_target(target), exclusive=False)
-        self.set_interval(TIMER_INTERVAL, self._on_timer)
+        self.set_interval(TIMER_INTERVAL, self._on_poll_timer)
+        self.set_interval(1.0, self._on_display_timer)
 
-    def _on_timer(self) -> None:
+    def _on_poll_timer(self) -> None:
         for target in self.targets:
             self.run_worker(
                 self._fetch_pane_states(target),
                 name=f"poll-{target}",
                 exclusive=True,
             )
-        self._refresh_tree()
+
+    def _on_display_timer(self) -> None:
+        now = _now()
+        if now - self._last_display_refresh >= self._display_interval(now):
+            self._refresh_tree()
+
+    def _display_interval(self, now: float) -> float:
+        """Return how many seconds should elapse between display refreshes."""
+        states = (
+            list(self._pane_states.values())
+            if self._pane_states
+            else ([] if self._ever_had_real_data else _MOCK_DATA)
+        )
+        min_age = min(
+            (now - max(ps.last_activity_ts, ps.last_silence_ts)
+             for ps in states
+             if ps.last_activity_ts or ps.last_silence_ts),
+            default=float("inf"),
+        )
+        if min_age < 60:
+            return 1.0
+        if min_age < 3600:
+            return 60.0
+        return 3600.0
 
     async def _fetch_pane_states(self, target: str) -> None:
         """Query tmux list-panes directly for current activity timestamps."""
@@ -229,6 +393,7 @@ class MmuxApp(App):
         proc = await asyncio.create_subprocess_exec(
             "ssh", "-o", "BatchMode=yes", target,
             f"tmux list-panes -a -F '{TMUX_PANE_FORMAT}'",
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -238,10 +403,11 @@ class MmuxApp(App):
             return
         count = 0
         for raw in stdout.decode(errors="replace").splitlines():
-            parts = raw.split("|")
-            if len(parts) != 4:
+            # Split with limit so pane_current_command (last field) may contain "|"
+            parts = raw.split("|", 5)
+            if len(parts) != 6:
                 continue
-            session, window_s, pane_s, activity_s = parts
+            session, window_s, pane_s, activity_s, current_path, current_command = parts
             try:
                 window = int(window_s)
                 pane_num = int(pane_s)
@@ -251,6 +417,8 @@ class MmuxApp(App):
             ps = self._pane_states.get(key) or PaneState(target, session, window, pane_num)
             if activity_s.isdigit():
                 ps.last_activity_ts = float(activity_s)
+            ps.current_path = current_path
+            ps.current_command = current_command
             self._pane_states[key] = ps
             count += 1
         log.debug("polled %d panes from %s", count, target)
@@ -358,15 +526,19 @@ class MmuxApp(App):
         self._refresh_tree()
 
     def _refresh_tree(self) -> None:
+        self._last_display_refresh = _now()
+        tree = self.query_one(SessionTree)
         if self._pane_states:
             self._ever_had_real_data = True
-        elif not self._ever_had_real_data:
-            return  # don't wipe mock data before any real data arrives
-        self.query_one(SessionTree).populate(
-            list(self._pane_states.values()),
-            active_secs=self._active_secs,
-            silent_secs=self._silent_secs,
-        )
+            tree.populate(
+                list(self._pane_states.values()),
+                active_secs=self._active_secs,
+                silent_secs=self._silent_secs,
+            )
+        elif self._ever_had_real_data:
+            tree.populate([])
+        else:
+            tree.populate(_MOCK_DATA)  # age mock timestamps in real time
 
     def action_reconnect(self) -> None:
         self._pane_states.clear()
