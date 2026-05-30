@@ -508,6 +508,7 @@ class MmuxApp(App):
             self.run_worker(
                 self._fetch_pane_states(target),
                 name=f"poll-{target}",
+                group=f"poll-{target}",
                 exclusive=True,
             )
 
