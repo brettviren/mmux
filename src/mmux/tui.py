@@ -187,6 +187,7 @@ class MmuxApp(App):
         self._pane_states: dict[tuple[str, str, int, int], PaneState] = {}
         self._active_secs = active_secs
         self._silent_secs = silent_secs
+        self._ever_had_real_data = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -293,6 +294,10 @@ class MmuxApp(App):
         self._refresh_tree()
 
     def _refresh_tree(self) -> None:
+        if self._pane_states:
+            self._ever_had_real_data = True
+        elif not self._ever_had_real_data:
+            return  # don't wipe mock data before any real events arrive
         self.query_one(SessionTree).populate(list(self._pane_states.values()))
 
     def action_reconnect(self) -> None:

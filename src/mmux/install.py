@@ -107,13 +107,19 @@ def install(target: str, queue_path: str = "~/.local/state/mmux") -> None:
             _ssh(target, "bash", "-c", f"cat > {pmp_file}", input=pmp)
 
     # 6. Register consumer with cat hook (idempotent: check consumer 0001 exists)
+    # Note: we write the hook file directly via stdin rather than using
+    # `mmuxq consumer --hook <cmd>`, because SSH joins list args with spaces on
+    # the remote shell, causing `>>` in the hook command to be interpreted as a
+    # redirect, corrupting events.jsonl with the consumer path.
     consumer_dir = f"{qmp}/consumers/0001"
     result = _ssh(target, "test", "-d", consumer_dir, check=False)
     if result.returncode != 0:
         log.info("registering consumer on %s", target)
         events_file = f"{queue_path}/events.jsonl"
-        hook_cmd = f'cat "$MMUXQ_CMF" >> {events_file}'
-        _ssh(target, f"~/.local/bin/mmuxq", "consumer", "--hook", hook_cmd, qmp)
+        _ssh(target, "mkdir", "-p", f"{consumer_dir}/queue")
+        _ssh(target,
+             "bash", "-c", f"cat > {consumer_dir}/consumer-hook",
+             input=f'cat "$MMUXQ_CMF" >> {events_file}\n')
 
     # 7. Touch events.jsonl
     events_file = f"{queue_path}/events.jsonl"
