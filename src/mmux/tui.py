@@ -120,26 +120,6 @@ def _parse_target_spec(spec: str) -> tuple[str, str | None]:
 
 
 _now = time.time
-_MOCK_NOW = _now()
-
-_MOCK_DATA: list[PaneState] = [
-    PaneState("user@host1", "main", 0, 0, last_activity_ts=_MOCK_NOW - 10,
-              current_path="/home/user", current_command="bash"),
-    PaneState("user@host1", "main", 0, 1, last_silence_ts=_MOCK_NOW - 5,
-              current_path="/home/user/project", current_command="vim"),
-    PaneState("user@host1", "work", 0, 0, last_activity_ts=_MOCK_NOW - 500,
-              current_path="/home/user/work", current_command="python"),
-    PaneState("user@host1", "work", 0, 1, last_activity_ts=_MOCK_NOW - 480,
-              current_path="/home/user/work/tests", current_command="pytest"),
-    PaneState("user@host2", "build", 0, 0, last_silence_ts=_MOCK_NOW - 90,
-              current_path="/srv/app", current_command="make"),
-    PaneState("user@host2", "build", 0, 1, last_activity_ts=_MOCK_NOW - 600,
-              current_path="/srv/app/src", current_command="bash"),
-    PaneState("user@host2", "debug", 0, 0, last_activity_ts=_MOCK_NOW - 5,
-              current_path="/srv/app", current_command="gdb"),
-    PaneState("user@host2", "debug", 0, 1, last_activity_ts=_MOCK_NOW - 15,
-              current_path="/srv/app/src", current_command="bash"),
-]
 
 
 class MmuxqNotInstalledDialog(ModalScreen):
@@ -164,32 +144,6 @@ class MmuxqNotInstalledDialog(ModalScreen):
             self.dismiss("install_and_start")
         elif event.button.id == "btn-install":
             self.dismiss("just_install")
-        else:
-            self.dismiss(None)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-
-class MmuxqNotRunningDialog(ModalScreen):
-    """Shown when mmuxq is installed but the dispatcher is not running."""
-
-    BINDINGS = [("escape", "cancel", "Cancel")]
-
-    def __init__(self, remote: str) -> None:
-        super().__init__()
-        self._remote = remote
-
-    def compose(self) -> ComposeResult:
-        with Vertical(classes="dialog-box"):
-            yield Label(f"mmuxq is not running on {self._remote}", classes="dialog-title")
-            with Horizontal(classes="dialog-buttons"):
-                yield Button("Start", variant="primary", id="btn-start")
-                yield Button("Cancel", id="btn-cancel")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-start":
-            self.dismiss("start")
         else:
             self.dismiss(None)
 
@@ -288,6 +242,10 @@ class SessionTree(Tree):
     BINDINGS = [
         ("enter", "attach", "Attach"),
         ("tab", "toggle_node", "Toggle"),
+        ("k", "cursor_up", ""),
+        ("ctrl+p", "cursor_up", ""),
+        ("j", "cursor_down", ""),
+        ("ctrl+n", "cursor_down", ""),
     ]
 
     show_root = False
@@ -452,6 +410,8 @@ class SessionTree(Tree):
 
 
 class MmuxApp(App):
+    COMMAND_PALETTE_BINDING = "ctrl+h"
+
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("r", "reconnect", "Reconnect"),
@@ -482,8 +442,7 @@ class MmuxApp(App):
     #notif-log.visible {
         display: block;
     }
-    AddTargetDialog, NewSessionDialog,
-    MmuxqNotInstalledDialog, MmuxqNotRunningDialog {
+    AddTargetDialog, NewSessionDialog, MmuxqNotInstalledDialog {
         align: center middle;
     }
     .dialog-box {
@@ -522,7 +481,6 @@ class MmuxApp(App):
         self._session_filters: dict[str, str] = {}  # ssh_host -> session name to show
         self._active_secs = active_secs
         self._silent_secs = silent_secs
-        self._ever_had_real_data = False
         self._last_display_refresh: float = 0.0
 
     def compose(self) -> ComposeResult:
@@ -533,11 +491,9 @@ class MmuxApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        if self.targets == ["localhost"] and not self._pane_states:
-            self.query_one(SessionTree).populate(_MOCK_DATA)
-            self._last_display_refresh = _now()
         for target in self.targets:
             self.run_worker(self._stream_target(target), exclusive=False)
+        self._on_poll_timer()
         self.set_interval(TIMER_INTERVAL, self._on_poll_timer)
         self.set_interval(1.0, self._on_display_timer)
 
@@ -556,14 +512,9 @@ class MmuxApp(App):
 
     def _display_interval(self, now: float) -> float:
         """Return how many seconds should elapse between display refreshes."""
-        states = (
-            list(self._pane_states.values())
-            if self._pane_states
-            else ([] if self._ever_had_real_data else _MOCK_DATA)
-        )
         min_age = min(
             (now - max(ps.last_activity_ts, ps.last_silence_ts)
-             for ps in states
+             for ps in self._pane_states.values()
              if ps.last_activity_ts or ps.last_silence_ts),
             default=float("inf"),
         )
@@ -644,11 +595,8 @@ class MmuxApp(App):
             else:
                 return
         elif not await async_is_running(target):
-            action = await self.push_screen_wait(MmuxqNotRunningDialog(target))
-            if action == "start":
-                await asyncio.get_event_loop().run_in_executor(None, _start, target)
-            else:
-                return
+            log.info("mmuxq not running on %s; starting dispatcher", target)
+            await asyncio.get_event_loop().run_in_executor(None, _start, target)
 
         # Bootstrap initial pane state from tmux before blocking on the event stream.
         await self._fetch_pane_states(target)
@@ -731,24 +679,18 @@ class MmuxApp(App):
     def _refresh_tree(self) -> None:
         self._last_display_refresh = _now()
         tree = self.query_one(SessionTree)
-        if self._pane_states:
-            self._ever_had_real_data = True
-            states = list(self._pane_states.values())
-            if self._session_filters:
-                states = [
-                    ps for ps in states
-                    if ps.host not in self._session_filters
-                    or ps.session == self._session_filters[ps.host]
-                ]
-            tree.populate(
-                states,
-                active_secs=self._active_secs,
-                silent_secs=self._silent_secs,
-            )
-        elif self._ever_had_real_data:
-            tree.populate([])
-        else:
-            tree.populate(_MOCK_DATA)  # age mock timestamps in real time
+        states = list(self._pane_states.values())
+        if self._session_filters:
+            states = [
+                ps for ps in states
+                if ps.host not in self._session_filters
+                or ps.session == self._session_filters[ps.host]
+            ]
+        tree.populate(
+            states,
+            active_secs=self._active_secs,
+            silent_secs=self._silent_secs,
+        )
 
     def action_reconnect(self) -> None:
         self._pane_states.clear()
