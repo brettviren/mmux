@@ -211,12 +211,13 @@ Given this config:
 home_volume = "myapp-home"
 home_mount  = "/home/user"
 run_args    = "--rm -ti"
+image       = "myimage"
 #+end_src
 
 the command:
 
 #+begin_src shell
-mmux container run myapp myimage bash
+mmux container run myapp bash
 #+end_src
 
 expands to:
@@ -229,8 +230,9 @@ podman run \
   myimage bash
 #+end_src
 
-The mmux volume flags come first, then ~run_args~ from config, then any
-extra arguments supplied on the command line.  The PMP path is read from
+The full expansion order is: mmux volume flags, ~run_args~ tokens, ~image~
+(if set), then any extra arguments supplied on the command line.  If ~image~
+is not set the user must supply the image name as the first extra argument.  The PMP path is read from
 the local ~claude.pmp~ file (provisioned by ~mmux install localhost~).  If
 it is not yet provisioned a warning is printed and only the home volume is
 mounted.  The full command is logged at DEBUG level to the mmux log file.
@@ -286,7 +288,8 @@ Each ~[container.<nick>]~ section supports:
 | ~pmp_mount~    | string | ~"/run/mmux/pmp"~ | PMP mount point inside the container    |
 | ~home_volume~  | string | —                 | Volume name for the container user home  |
 | ~home_mount~   | string | —                 | Mount path of ~home_volume~ in container |
-| ~run_args~     | string | ~""~              | Extra flags inserted before user args in ~container run~ |
+| ~run_args~     | string | ~""~              | Extra flags inserted before the image in ~container run~ |
+| ~image~        | string | ~""~              | Container image name, inserted after ~run_args~          |
 
 ~home_volume~ and ~home_mount~ are required (from config or CLI flags) for
 ~mmux container hooks~ and ~mmux container run~ to work.

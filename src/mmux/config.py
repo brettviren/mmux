@@ -18,6 +18,7 @@ class ContainerConfig:
     home_volume: str = ""
     home_mount: str = ""
     run_args: str = ""
+    image: str = ""
 
 
 @dataclass
@@ -39,6 +40,7 @@ def resolve_container(cfg: MmuxConfig, nick: str) -> ContainerConfig:
         home_volume=named.home_volume or default.home_volume,
         home_mount=named.home_mount or default.home_mount,
         run_args=named.run_args or default.run_args,
+        image=named.image or default.image,
     )
 
 
@@ -70,6 +72,8 @@ def save(cfg: MmuxConfig, path: str | Path | None = None) -> Path:
             lines.append(f'home_mount = "{ccfg.home_mount}"\n')
         if ccfg.run_args:
             lines.append(f'run_args = "{ccfg.run_args}"\n')
+        if ccfg.image:
+            lines.append(f'image = "{ccfg.image}"\n')
     for t in cfg.targets:
         lines.append("\n[[targets]]\n")
         lines.append(f'host = "{t.host}"\n')
@@ -95,6 +99,7 @@ def load(path: str | Path | None = None) -> MmuxConfig:
             home_volume=c.get("home_volume", ""),
             home_mount=c.get("home_mount", ""),
             run_args=c.get("run_args", ""),
+            image=c.get("image", ""),
         )
         for nick, c in raw.get("container", {}).items()
     }

@@ -271,7 +271,8 @@ def container_run(ctx: click.Context, nick: str, args: tuple[str, ...]) -> None:
         )
 
     extra = shlex.split(ccfg.run_args) if ccfg.run_args else []
-    cmd = [ccfg.client, "run"] + mmux_flags + extra + list(args)
+    image = [ccfg.image] if ccfg.image else []
+    cmd = [ccfg.client, "run"] + mmux_flags + extra + image + list(args)
     log.debug("container run: %s", " ".join(cmd))
     for h in logging.getLogger().handlers:
         h.flush()
