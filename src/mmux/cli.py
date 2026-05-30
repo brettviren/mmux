@@ -29,9 +29,10 @@ def main(ctx: click.Context, debug: bool, config_path: str | None,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
         handlers=[logging.FileHandler(log_path)],
     )
-    from mmux.config import load
+    from mmux.config import load, _xdg_config
     ctx.ensure_object(dict)
     ctx.obj["cfg"] = load(config_path)
+    ctx.obj["config_path"] = config_path or str(_xdg_config())
     ctx.obj["log_file"] = str(log_path)
 
 
@@ -154,4 +155,6 @@ def tui(ctx: click.Context, active_secs: int | None, silent_secs: int | None,
         targets=resolved,
         active_secs=active_secs or cfg.active_secs,
         silent_secs=silent_secs or cfg.silent_secs,
+        config_path=ctx.obj.get("config_path"),
+        queue_path=cfg.queue_path,
     ).run()

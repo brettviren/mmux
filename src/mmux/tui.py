@@ -3,6 +3,7 @@ import asyncio
 import logging
 import shlex
 import time
+from pathlib import Path
 from mmux import ssh
 from dataclasses import dataclass
 from textual.app import App, ComposeResult
@@ -418,6 +419,7 @@ class MmuxApp(App):
         ("l", "toggle_log", "Log"),
         ("a", "add", "Add"),
         ("n", "new", "New"),
+        ("s", "save_config", "Save"),
     ]
 
     CSS = """
@@ -474,6 +476,8 @@ class MmuxApp(App):
     def __init__(self, targets: list[str] | None = None,
                  active_secs: int = ACTIVE_SECS,
                  silent_secs: int = SILENT_SECS,
+                 config_path: str | Path | None = None,
+                 queue_path: str = "~/.local/state/mmux",
                  **kwargs) -> None:
         super().__init__(**kwargs)
         self.targets = targets or ["localhost"]
@@ -482,6 +486,8 @@ class MmuxApp(App):
         self._active_secs = active_secs
         self._silent_secs = silent_secs
         self._last_display_refresh: float = 0.0
+        self._config_path = Path(config_path) if config_path else None
+        self._queue_path = queue_path
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -739,6 +745,27 @@ class MmuxApp(App):
             )
 
         self.push_screen(NewSessionDialog(), handle)
+
+    def action_save_config(self) -> None:
+        from mmux.config import MmuxConfig, TargetConfig, save
+        cfg = MmuxConfig(
+            active_secs=self._active_secs,
+            silent_secs=self._silent_secs,
+            queue_path=self._queue_path,
+            targets=[
+                TargetConfig(
+                    host=host,
+                    sessions=[self._session_filters[host]] if host in self._session_filters else [],
+                )
+                for host in self.targets
+            ],
+        )
+        try:
+            path = save(cfg, self._config_path)
+            self.notify(f"Saved to {path}", title="Config saved")
+        except Exception as exc:
+            log.error("save_config failed: %s", exc)
+            self.notify(str(exc), title="Save failed", severity="error")
 
     async def _launch_session(self, remote: str, session_name: str, command: str) -> None:
         tmux_cmd = ["tmux", "new-session", "-d"]

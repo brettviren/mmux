@@ -1,0 +1,117 @@
+#+title: mmux
+#+author: Brett Viren
+
+Monitor tmux sessions on remote (and local) hosts in a Textual TUI.
+Events flow through a filesystem queue (~mmuxq~) on each remote host and
+are streamed to the local machine over SSH.
+
+* Installation
+
+#+begin_src shell
+uv tool install mmux
+mmux install user@host
+mmux tui user@host
+#+end_src
+
+* TUI Key Bindings
+
+| Key      | Action             |
+|----------+--------------------|
+| ~q~      | Quit               |
+| ~r~      | Reconnect all      |
+| ~a~      | Add remote target  |
+| ~n~      | New tmux session   |
+| ~s~      | Save config        |
+| ~l~      | Toggle log panel   |
+| ~enter~  | Attach to session  |
+| ~tab~    | Toggle expand node |
+| ~j~/~↓~  | Cursor down        |
+| ~k~/~↑~  | Cursor up          |
+
+Pressing ~s~ writes the currently monitored remotes (and all other
+settings) back to the active configuration file.  If the file does not
+yet exist it is created automatically.
+
+* Configuration
+
+The default configuration file is:
+
+#+begin_example
+~/.config/mmux/config.toml
+#+end_example
+
+Override this with the ~--config PATH~ global flag:
+
+#+begin_src shell
+mmux --config /path/to/my.toml tui
+#+end_src
+
+** Schema
+
+#+begin_src toml
+[defaults]
+# Seconds after the last keystroke before a pane turns yellow (◎).
+active_secs = 30
+
+# Seconds after going yellow before a pane turns white (○).
+silent_secs = 300
+
+# Base directory for mmux state on every remote host.
+queue_path = "~/.local/state/mmux"
+
+# One [[targets]] block per remote host to monitor.
+[[targets]]
+# SSH destination accepted by the system ssh(1) binary.
+# Examples: "user@host", "host", "alias-from-~/.ssh/config"
+host = "user@hostname"
+
+# Optional list of tmux session names to display.
+# When empty all sessions on the host are shown.
+sessions = []
+#+end_src
+
+*** Field reference
+
+**** ~[defaults]~ table
+
+| Field         | Type    | Default                   | Description                                         |
+|---------------+---------+---------------------------+-----------------------------------------------------|
+| ~active_secs~ | integer | ~30~                      | Seconds of activity before a pane turns yellow (◎) |
+| ~silent_secs~ | integer | ~300~                     | Seconds silent before a pane turns white (○)        |
+| ~queue_path~  | string  | ~"~/.local/state/mmux"~   | Base state directory on remote hosts                |
+
+**** ~[[targets]]~ array of tables
+
+Each entry describes one host to monitor.  You may have any number of
+~[[targets]]~ blocks.
+
+| Field      | Type            | Required | Description                                              |
+|------------+-----------------+----------+----------------------------------------------------------|
+| ~host~     | string          | yes      | SSH destination (~user@host~, hostname, or SSH alias)    |
+| ~sessions~ | array of strings | no      | Session names to show; empty means show all sessions     |
+
+** Example
+
+#+begin_src toml
+[defaults]
+active_secs = 60
+silent_secs  = 600
+queue_path   = "~/.local/state/mmux"
+
+[[targets]]
+host = "dev-server"
+
+[[targets]]
+host = "user@build-box"
+sessions = ["main", "ci"]
+#+end_src
+
+* Status Indicators
+
+Each pane is annotated with a coloured dot:
+
+| Symbol | Colour | Meaning                                           |
+|--------+--------+---------------------------------------------------|
+| ~●~    | green  | Activity within the last ~active_secs~ seconds    |
+| ~◎~    | yellow | Gone silent, or no activity for 30–300 s          |
+| ~○~    | white  | No activity for more than ~silent_secs~ seconds   |
