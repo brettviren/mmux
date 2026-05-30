@@ -143,7 +143,7 @@ _MOCK_DATA: list[PaneState] = [
 
 
 class MmuxqNotInstalledDialog(ModalScreen):
-    """Shown when the mmuxq binary is absent on the remote."""
+    """Shown when the mmux package is absent on the remote."""
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
@@ -153,7 +153,7 @@ class MmuxqNotInstalledDialog(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog-box"):
-            yield Label(f"mmuxq is not installed on {self._remote}", classes="dialog-title")
+            yield Label(f"mmux is not installed on {self._remote}", classes="dialog-title")
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Install and Start", variant="primary", id="btn-install-start")
                 yield Button("Just install", id="btn-install")

@@ -41,25 +41,38 @@ def main(ctx: click.Context, debug: bool, config_path: str | None,
 @click.argument("targets", nargs=-1, required=True)
 @click.pass_context
 def install(ctx: click.Context, queue_path: str | None, targets: tuple[str, ...]) -> None:
-    """Install mmux on one or more remote TARGETS."""
+    """Install mmux on one or more remote TARGETS via uv tool install."""
     from mmux.install import install as do_install
     cfg = ctx.obj["cfg"]
     qp = queue_path or cfg.queue_path
     for target in targets:
         click.echo(f"Installing on {target} ...")
-        do_install(target, queue_path=qp)
-        click.echo(f"  Done: {target}")
+        try:
+            do_install(target, queue_path=qp)
+            click.echo(f"  Done: {target}")
+        except RuntimeError as exc:
+            click.echo(f"  Failed: {exc}")
 
 
 @main.command()
-@click.option("--purge", is_flag=True, help="Also remove ~/.local/state/mmux entirely.")
+@click.option(
+    "--action",
+    type=click.Choice(["stop", "purge", "remove"]),
+    default="stop",
+    show_default=True,
+    help=(
+        "stop: stop the dispatcher. "
+        "purge: stop + delete queue state. "
+        "remove: purge + uv tool uninstall mmux."
+    ),
+)
 @click.argument("targets", nargs=-1, required=True)
-def uninstall(purge: bool, targets: tuple[str, ...]) -> None:
+def uninstall(action: str, targets: tuple[str, ...]) -> None:
     """Uninstall mmux from one or more remote TARGETS."""
     from mmux.install import uninstall as do_uninstall
     for target in targets:
-        click.echo(f"Uninstalling from {target} ...")
-        do_uninstall(target, purge=purge)
+        click.echo(f"Uninstalling ({action}) from {target} ...")
+        do_uninstall(target, action=action)
         click.echo(f"  Done: {target}")
 
 
@@ -82,6 +95,9 @@ def status(ctx: click.Context, queue_path: str | None, targets: tuple[str, ...])
             )
             return r.stdout.strip() if r.returncode == 0 else ""
 
+        # Remote version
+        version = _ssh('PATH="$HOME/.local/bin:$PATH" mmuxq --version 2>/dev/null') or "unknown"
+
         # Dispatcher state
         pid = _ssh(f"cat {qmp}/dispatcher.pid 2>/dev/null")
         if pid:
@@ -99,7 +115,10 @@ def status(ctx: click.Context, queue_path: str | None, targets: tuple[str, ...])
             f"\"import sys,json; d=json.load(sys.stdin); print(d.get('ts','?'))\" 2>/dev/null"
         ) or "never"
 
-        click.echo(f"{target}: dispatcher={disp}  pending={pending}  last={last_event}")
+        click.echo(
+            f"{target}: version={version}  dispatcher={disp}"
+            f"  pending={pending}  last={last_event}"
+        )
 
 
 @main.command()

@@ -2,7 +2,6 @@
 from __future__ import annotations
 import json
 import logging
-import sys
 
 from mmux import ssh
 
@@ -63,6 +62,18 @@ CLAUDE_NOTIFICATION_HOOK = {
     "hooks": [{"type": "command", "command": "~/.local/bin/mmux-claude-hook"}],
 }
 
+TMUX_HOOK_NAMES = (
+    "alert-activity",
+    "alert-silence",
+    "session-created",
+    "session-closed",
+    "after-new-window",
+    "after-split-window",
+    "pane-exited",
+)
+
+_MMUX_REPO = "git+https://github.com/brettviren/mmux"
+
 
 def _ssh(target: str, *cmd: str, input: str | None = None, check: bool = True):
     return ssh.run(target, *cmd, input=input, check=check)
@@ -73,9 +84,12 @@ def _mmuxq_path(queue_path: str) -> str:
 
 
 async def async_is_installed(target: str) -> bool:
-    """Return True if the mmuxq binary is present on *target*."""
+    """Return True if mmuxq is available on *target*."""
     from mmux import ssh as _ssh_mod
-    _, rc = await _ssh_mod.async_run(target, "test", "-f", "~/.local/bin/mmuxq")
+    _, rc = await _ssh_mod.async_run(
+        target, "bash", "-c",
+        'PATH="$HOME/.local/bin:$PATH" command -v mmuxq >/dev/null 2>&1',
+    )
     return rc == 0
 
 
@@ -94,48 +108,48 @@ def start(target: str, queue_path: str = "~/.local/state/mmux") -> None:
     """Start the mmuxq dispatcher on an already-installed *target*."""
     qmp = f"{queue_path}/queue"
     log.info("starting dispatcher on %s", target)
-    _ssh(target, f"~/.local/bin/mmuxq", "start", qmp, check=False)
+    _ssh(target, "~/.local/bin/mmuxq", "start", qmp, check=False)
 
 
 def install(target: str, queue_path: str = "~/.local/state/mmux", *, start_dispatcher: bool = True) -> None:
-    import importlib.resources
     qmp = f"{queue_path}/queue"
 
-    # 1. Check for existing install (idempotent: warn, not abort)
-    result = _ssh(target, "test", "-f", f"{qmp}/dispatcher.pid", check=False)
-    if result.returncode == 0:
-        log.warning("dispatcher already running on %s; re-installing over existing setup", target)
+    # 1. Install the mmux package via uv (provides both mmux and mmuxq commands).
+    log.info("running uv tool install on %s", target)
+    result = _ssh(
+        target, "uv", "tool", "install", "--upgrade", _MMUX_REPO,
+        check=False,
+    )
+    if result.returncode != 0:
+        lines = "\n".join(
+            line for line in (result.stdout + result.stderr).splitlines() if line.strip()
+        )
+        raise RuntimeError(
+            f"uv tool install failed on {target} (rc={result.returncode}):\n{lines}"
+        )
 
-    # 2. Copy mmuxq to ~/.local/bin/
-    log.info("copying mmuxq to %s:~/.local/bin/mmuxq", target)
-    _ssh(target, "mkdir", "-p", "~/.local/bin")
-    ref = importlib.resources.files("mmux").joinpath("mmuxq")
-    with importlib.resources.as_file(ref) as mmuxq_path:
-        ssh.scp(str(mmuxq_path), f"{target}:~/.local/bin/mmuxq")
-    _ssh(target, "chmod", "+x", "~/.local/bin/mmuxq")
-
-    # 3. Write helper scripts via SSH stdin
+    # 2. Write helper scripts via SSH stdin.
     for name, content in [("mmux-hook", MMUX_HOOK), ("mmux-claude-hook", MMUX_CLAUDE_HOOK)]:
         log.info("writing %s on %s", name, target)
         _ssh(target,
              "bash", "-c", f"cat > ~/.local/bin/{name} && chmod +x ~/.local/bin/{name}",
              input=content)
 
-    # 4. Init queue (idempotent: mmuxq init is safe to re-run)
+    # 3. Init queue (idempotent: mmuxq init is safe to re-run).
     log.info("initialising queue on %s", target)
     _ssh(target, "mkdir", "-p", queue_path)
-    _ssh(target, f"~/.local/bin/mmuxq", "init", qmp, check=False)
+    _ssh(target, "~/.local/bin/mmuxq", "init", qmp, check=False)
 
-    # 5. Register tmux and claude producers (idempotent via fixed .pmp files)
+    # 4. Register tmux and claude producers (idempotent via fixed .pmp files).
     for proto in ("tmux", "claude"):
         pmp_file = f"{queue_path}/{proto}.pmp"
         result = _ssh(target, "test", "-s", pmp_file, check=False)
         if result.returncode != 0:
             log.info("registering %s producer on %s", proto, target)
-            pmp = _ssh(target, f"~/.local/bin/mmuxq", "producer", qmp).stdout.strip()
+            pmp = _ssh(target, "~/.local/bin/mmuxq", "producer", qmp).stdout.strip()
             _ssh(target, "bash", "-c", f"cat > {pmp_file}", input=pmp)
 
-    # 6. Register consumer with cat hook (idempotent: check consumer 0001 exists)
+    # 5. Register consumer with cat hook (idempotent: check consumer 0001 exists).
     # Note: we write the hook file directly via stdin rather than using
     # `mmuxq consumer --hook <cmd>`, because SSH joins list args with spaces on
     # the remote shell, causing `>>` in the hook command to be interpreted as a
@@ -150,20 +164,20 @@ def install(target: str, queue_path: str = "~/.local/state/mmux", *, start_dispa
              "bash", "-c", f"cat > {consumer_dir}/consumer-hook",
              input=f'cat "$MMUXQ_CMF" >> {events_file}\n')
 
-    # 7. Touch events.jsonl
+    # 6. Touch events.jsonl.
     events_file = f"{queue_path}/events.jsonl"
     _ssh(target, "touch", events_file)
 
-    # 8. Start dispatcher (idempotent: mmuxq start warns if already running)
+    # 7. Start dispatcher (idempotent: mmuxq start warns if already running).
     if start_dispatcher:
         log.info("starting dispatcher on %s", target)
-        _ssh(target, f"~/.local/bin/mmuxq", "start", qmp, check=False)
+        _ssh(target, "~/.local/bin/mmuxq", "start", qmp, check=False)
 
-    # 9. Install tmux hooks
+    # 8. Install tmux hooks.
     log.info("installing tmux hooks on %s", target)
     _ssh(target, "tmux", "source", "/dev/stdin", input=TMUX_HOOKS, check=False)
 
-    # 10. Merge Notification hook into ~/.claude/settings.json
+    # 9. Merge Notification hook into ~/.claude/settings.json.
     log.info("patching ~/.claude/settings.json on %s", target)
     result = _ssh(target, "cat", "~/.claude/settings.json", check=False)
     try:
@@ -184,50 +198,57 @@ def install(target: str, queue_path: str = "~/.local/state/mmux", *, start_dispa
     log.info("install complete on %s", target)
 
 
-TMUX_HOOK_NAMES = (
-    "alert-activity",
-    "alert-silence",
-    "session-created",
-    "session-closed",
-    "after-new-window",
-    "after-split-window",
-    "pane-exited",
-)
+def uninstall(target: str, queue_path: str = "~/.local/state/mmux", action: str = "stop") -> None:
+    """Run uninstall action on *target*.
 
-
-def uninstall(target: str, queue_path: str = "~/.local/state/mmux", purge: bool = False) -> None:
+    Actions are cumulative:
+      stop   — stop the mmuxq dispatcher process.
+      purge  — stop + remove tmux hooks + remove Claude hook + delete queue directory.
+      remove — purge + remove helper scripts + uv tool uninstall mmux.
+    """
     qmp = f"{queue_path}/queue"
 
-    # Stop dispatcher
+    # Always: stop the dispatcher.
     log.info("stopping dispatcher on %s", target)
-    _ssh(target, f"~/.local/bin/mmuxq", "stop", qmp, check=False)
+    _ssh(target, "~/.local/bin/mmuxq", "stop", qmp, check=False)
 
-    # Remove tmux hooks
-    log.info("removing tmux hooks on %s", target)
-    unhook_cmds = "\n".join(f"set-hook -gu {name}" for name in TMUX_HOOK_NAMES)
-    _ssh(target, "tmux", "source", "/dev/stdin", input=unhook_cmds, check=False)
+    if action in ("purge", "remove"):
+        # Remove tmux hooks.
+        log.info("removing tmux hooks on %s", target)
+        unhook_cmds = "\n".join(f"set-hook -gu {name}" for name in TMUX_HOOK_NAMES)
+        _ssh(target, "tmux", "source", "/dev/stdin", input=unhook_cmds, check=False)
 
-    # Remove Notification hook from ~/.claude/settings.json
-    log.info("patching ~/.claude/settings.json on %s", target)
-    result = _ssh(target, "cat", "~/.claude/settings.json", check=False)
-    if result.returncode == 0 and result.stdout.strip():
-        try:
-            cfg = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            cfg = {}
-        notifs = cfg.get("hooks", {}).get("Notification", [])
-        filtered = [
-            entry for entry in notifs
-            if not any(h.get("command") == "~/.local/bin/mmux-claude-hook"
-                       for h in entry.get("hooks", []))
-        ]
-        if filtered != notifs:
-            cfg.setdefault("hooks", {})["Notification"] = filtered
-            _ssh(target, "bash", "-c", "cat > ~/.claude/settings.json",
-                 input=json.dumps(cfg, indent=2))
+        # Remove Notification hook from ~/.claude/settings.json.
+        log.info("patching ~/.claude/settings.json on %s", target)
+        result = _ssh(target, "cat", "~/.claude/settings.json", check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            try:
+                cfg = json.loads(result.stdout)
+            except json.JSONDecodeError:
+                cfg = {}
+            notifs = cfg.get("hooks", {}).get("Notification", [])
+            filtered = [
+                entry for entry in notifs
+                if not any(h.get("command") == "~/.local/bin/mmux-claude-hook"
+                           for h in entry.get("hooks", []))
+            ]
+            if filtered != notifs:
+                cfg.setdefault("hooks", {})["Notification"] = filtered
+                _ssh(target, "bash", "-c", "cat > ~/.claude/settings.json",
+                     input=json.dumps(cfg, indent=2))
 
-    if purge:
+        # Delete queue directory tree.
         log.info("purging %s on %s", queue_path, target)
         _ssh(target, "rm", "-rf", queue_path, check=False)
 
-    log.info("uninstall complete on %s", target)
+    if action == "remove":
+        # Remove helper scripts.
+        log.info("removing helper scripts on %s", target)
+        for name in ("mmux-hook", "mmux-claude-hook"):
+            _ssh(target, "rm", "-f", f"~/.local/bin/{name}", check=False)
+
+        # Uninstall the package via uv.
+        log.info("running uv tool uninstall on %s", target)
+        _ssh(target, "uv", "tool", "uninstall", "mmux", check=False)
+
+    log.info("uninstall (%s) complete on %s", action, target)
