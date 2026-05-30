@@ -13,14 +13,6 @@ DEFAULT_CLIENT = "podman"
 DEFAULT_PMP_MOUNT = "/run/mmux/pmp"
 
 
-def _home_mount(home: str) -> str:
-    """Extract the container mount path from a ``volume:mount`` or ``volume:mount:opts`` string."""
-    parts = home.split(":")
-    if len(parts) < 2:
-        raise ValueError(f"--home must be VOLUME:MOUNT, got: {home!r}")
-    return parts[1]
-
-
 def _prime_script(pmp_mount: str, home_mount: str) -> str:
     """Build the bash script that runs inside the container to install hooks.
 
@@ -59,22 +51,21 @@ def prime_hooks(
     container: str,
     *,
     client: str = DEFAULT_CLIENT,
-    home: str,
+    home_volume: str,
+    home_mount: str,
     pmp_mount: str = DEFAULT_PMP_MOUNT,
 ) -> None:
     """Run a one-shot container on *target* that configures claude hooks on the home volume.
 
-    *home* is a ``volume:mount[:[opts]]`` string passed directly to ``-v``.
     The priming container runs as root so it can write to a fresh volume whose
     root directory is owned by root.  The PMP volume is not needed for priming.
     """
-    mount = _home_mount(home)
-    script = _prime_script(pmp_mount, mount)
+    script = _prime_script(pmp_mount, home_mount)
     cmd = [
         client, "run", "--rm", "-i",
         "--user", "root",
-        "-e", f"HOME={mount}",
-        "-v", home,
+        "-e", f"HOME={home_mount}",
+        "-v", f"{home_volume}:{home_mount}",
         container, "bash", "-s",
     ]
     log.info("priming container %s on %s", container, target)

@@ -134,7 +134,15 @@ container
 *** Phase 1 — prime the home volume (once per image/volume combination)
 
 #+begin_src shell
-mmux container hooks --name <image> --home <volume>:<mount> [REMOTE ...]
+mmux container hooks --name <image> --nick <nick> [REMOTE ...]
+#+end_src
+
+where ~<nick>~ refers to a ~[container.<nick>]~ section in ~config.toml~ that
+supplies ~home_volume~ and ~home_mount~.  Alternatively pass them on the
+command line:
+
+#+begin_src shell
+mmux container hooks --name <image> --home-volume <vol> --home-mount <path> [REMOTE ...]
 #+end_src
 
 This runs a short-lived container as root that:
@@ -183,46 +191,53 @@ RHEL); omit it for Docker or non-SELinux hosts.
 #+begin_src
 mmux container hooks [OPTIONS] [REMOTE ...]
 
-  --name CONTAINER    Container name or image (required)
-  --home VOLUME:MOUNT Home volume and mount point, e.g. myvolume:/home/user
+  --name CONTAINER        Container name or image (required)
+  --nick NICK             Config nickname: uses [container.<nick>] (default: default)
+  --home-volume VOLUME    Home volume name (overrides config)
+  --home-mount  MOUNT     Home volume mount path inside container (overrides config)
   --client [podman|docker]
-                      Container runtime (default: podman)
-  --pmp MOUNT         PMP mount point inside container
-                      (default: /run/mmux/pmp)
+                          Container runtime (default: podman)
+  --pmp MOUNT             PMP mount point inside container
+                          (default: /run/mmux/pmp)
 #+end_src
 
 ** Configuration
 
-Container defaults can be stored in ~config.toml~ to avoid repeating flags:
+Container settings live in independent ~[container.<nick>]~ sections.
+~[container.default]~ provides base values inherited by every nickname.
+This lets different containers share defaults while overriding individual
+fields, and decouples container config from the ~[[targets]]~ host list.
 
 #+begin_src toml
-[defaults]
-container_client    = "podman"
-container_pmp_mount = "/run/mmux/pmp"
+[container.default]
+client      = "podman"
+pmp_mount   = "/run/mmux/pmp"
 
-[[targets]]
-host                = "dev-server"
-container_home      = "myvolume:/home/user"
-container_client    = "podman"       # overrides [defaults] for this host
-container_pmp_mount = "/run/mmux/pmp"
+[container.myapp]
+home_volume = "myapp-home"
+home_mount  = "/home/user"
+
+[container.otherapp]
+home_volume = "other-home"
+home_mount  = "/home/other"
+client      = "docker"          # overrides default for this nickname
 #+end_src
+
+Select a nickname with ~--nick~; omitting ~--nick~ uses ~"default"~.
 
 *** Container field reference
 
-**** ~[defaults]~ additions
+Each ~[container.<nick>]~ section supports:
 
-| Field                  | Type   | Default            | Description                              |
-|------------------------+--------+--------------------+------------------------------------------|
-| ~container_client~     | string | ~"podman"~         | Container runtime (~podman~ or ~docker~) |
-| ~container_pmp_mount~  | string | ~"/run/mmux/pmp"~  | PMP mount point inside the container    |
+| Field          | Type   | Default           | Description                              |
+|----------------+--------+-------------------+------------------------------------------|
+| ~client~       | string | ~"podman"~        | Container runtime (~podman~ or ~docker~) |
+| ~pmp_mount~    | string | ~"/run/mmux/pmp"~ | PMP mount point inside the container    |
+| ~home_volume~  | string | —                 | Volume name for the container user home  |
+| ~home_mount~   | string | —                 | Mount path of ~home_volume~ in container |
 
-**** ~[[targets]]~ additions
-
-| Field                  | Type   | Required | Description                                        |
-|------------------------+--------+----------+----------------------------------------------------|
-| ~container_client~     | string | no       | Per-target override of the container runtime       |
-| ~container_home~       | string | no       | ~volume:mount~ for the container user's home dir   |
-| ~container_pmp_mount~  | string | no       | Per-target override of the PMP mount point         |
+~home_volume~ and ~home_mount~ are required (from config or CLI flags) for
+~mmux container hooks~ to run.
 
 * Status Indicators
 

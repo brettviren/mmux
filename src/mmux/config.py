@@ -9,9 +9,14 @@ from pathlib import Path
 class TargetConfig:
     host: str
     sessions: list[str] = field(default_factory=list)
-    container_client: str = ""       # "podman" or "docker"; empty = use global default
-    container_home: str = ""         # "volume:mount"; empty = not configured
-    container_pmp_mount: str = ""    # container mount path; empty = use global default
+
+
+@dataclass
+class ContainerConfig:
+    client: str = ""
+    pmp_mount: str = ""
+    home_volume: str = ""
+    home_mount: str = ""
 
 
 @dataclass
@@ -19,9 +24,20 @@ class MmuxConfig:
     active_secs: int = 30
     silent_secs: int = 300
     queue_path: str = "~/.local/state/mmux"
-    container_client: str = "podman"
-    container_pmp_mount: str = "/run/mmux/pmp"
+    containers: dict[str, ContainerConfig] = field(default_factory=dict)
     targets: list[TargetConfig] = field(default_factory=list)
+
+
+def resolve_container(cfg: MmuxConfig, nick: str) -> ContainerConfig:
+    """Merge ``container.<nick>`` over ``container.default``, filling hardcoded fallbacks."""
+    default = cfg.containers.get("default", ContainerConfig())
+    named = cfg.containers.get(nick, ContainerConfig()) if nick != "default" else ContainerConfig()
+    return ContainerConfig(
+        client=named.client or default.client or "podman",
+        pmp_mount=named.pmp_mount or default.pmp_mount or "/run/mmux/pmp",
+        home_volume=named.home_volume or default.home_volume,
+        home_mount=named.home_mount or default.home_mount,
+    )
 
 
 def _xdg_config() -> Path:
@@ -39,21 +55,23 @@ def save(cfg: MmuxConfig, path: str | Path | None = None) -> Path:
         f"active_secs = {cfg.active_secs}\n",
         f"silent_secs = {cfg.silent_secs}\n",
         f'queue_path = "{cfg.queue_path}"\n',
-        f'container_client = "{cfg.container_client}"\n',
-        f'container_pmp_mount = "{cfg.container_pmp_mount}"\n',
     ]
+    for nick, ccfg in cfg.containers.items():
+        lines.append(f"\n[container.{nick}]\n")
+        if ccfg.client:
+            lines.append(f'client = "{ccfg.client}"\n')
+        if ccfg.pmp_mount:
+            lines.append(f'pmp_mount = "{ccfg.pmp_mount}"\n')
+        if ccfg.home_volume:
+            lines.append(f'home_volume = "{ccfg.home_volume}"\n')
+        if ccfg.home_mount:
+            lines.append(f'home_mount = "{ccfg.home_mount}"\n')
     for t in cfg.targets:
         lines.append("\n[[targets]]\n")
         lines.append(f'host = "{t.host}"\n')
         if t.sessions:
             sessions_toml = "[" + ", ".join(f'"{s}"' for s in t.sessions) + "]"
             lines.append(f"sessions = {sessions_toml}\n")
-        if t.container_client:
-            lines.append(f'container_client = "{t.container_client}"\n')
-        if t.container_home:
-            lines.append(f'container_home = "{t.container_home}"\n')
-        if t.container_pmp_mount:
-            lines.append(f'container_pmp_mount = "{t.container_pmp_mount}"\n')
     with p.open("w") as f:
         f.writelines(lines)
     return p
@@ -66,20 +84,22 @@ def load(path: str | Path | None = None) -> MmuxConfig:
     with p.open("rb") as f:
         raw = tomllib.load(f)
     defaults = raw.get("defaults", {})
+    containers = {
+        nick: ContainerConfig(
+            client=c.get("client", ""),
+            pmp_mount=c.get("pmp_mount", ""),
+            home_volume=c.get("home_volume", ""),
+            home_mount=c.get("home_mount", ""),
+        )
+        for nick, c in raw.get("container", {}).items()
+    }
     cfg = MmuxConfig(
         active_secs=defaults.get("active_secs", 30),
         silent_secs=defaults.get("silent_secs", 300),
         queue_path=defaults.get("queue_path", "~/.local/state/mmux"),
-        container_client=defaults.get("container_client", "podman"),
-        container_pmp_mount=defaults.get("container_pmp_mount", "/run/mmux/pmp"),
+        containers=containers,
         targets=[
-            TargetConfig(
-                host=t["host"],
-                sessions=t.get("sessions", []),
-                container_client=t.get("container_client", ""),
-                container_home=t.get("container_home", ""),
-                container_pmp_mount=t.get("container_pmp_mount", ""),
-            )
+            TargetConfig(host=t["host"], sessions=t.get("sessions", []))
             for t in raw.get("targets", [])
         ],
     )
