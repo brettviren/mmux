@@ -13,20 +13,33 @@ DEFAULT_CLIENT = "podman"
 DEFAULT_PMP_MOUNT = "/run/mmux/pmp"
 
 
-def _prime_script(pmp_mount: str) -> str:
-    """Build the bash script that runs inside the container to install hooks."""
+def _home_mount(home: str) -> str:
+    """Extract the container mount path from a ``volume:mount`` or ``volume:mount:opts`` string."""
+    parts = home.split(":")
+    if len(parts) < 2:
+        raise ValueError(f"--home must be VOLUME:MOUNT, got: {home!r}")
+    return parts[1]
+
+
+def _prime_script(pmp_mount: str, home_mount: str) -> str:
+    """Build the bash script that runs inside the container to install hooks.
+
+    Uses explicit paths (not ~) so the script is correct regardless of which
+    shell user runs it (the priming run executes as root).
+    """
     from mmux.install import MMUX_CLAUDE_HOOK
     hook_b64 = base64.b64encode(MMUX_CLAUDE_HOOK.encode()).decode()
+    h = home_mount.rstrip("/")
     lines = [
         "#!/usr/bin/env bash",
         "set -e",
-        "mkdir -p ~/.local/bin ~/.local/state/mmux ~/.claude",
-        f"printf '%s\\n' '{pmp_mount}' > ~/.local/state/mmux/claude.pmp",
-        f"echo '{hook_b64}' | base64 -d > ~/.local/bin/mmux-claude-hook",
-        "chmod +x ~/.local/bin/mmux-claude-hook",
+        f"mkdir -p {h}/.local/bin {h}/.local/state/mmux {h}/.claude",
+        f"printf '%s\\n' '{pmp_mount}' > {h}/.local/state/mmux/claude.pmp",
+        f"echo '{hook_b64}' | base64 -d > {h}/.local/bin/mmux-claude-hook",
+        f"chmod +x {h}/.local/bin/mmux-claude-hook",
         "python3 - << 'ENDOFPY'",
-        "import json, pathlib",
-        "p = pathlib.Path.home() / '.claude' / 'settings.json'",
+        "import json, os, pathlib",
+        f"p = pathlib.Path('{h}') / '.claude' / 'settings.json'",
         "cfg = json.loads(p.read_text()) if p.exists() and p.stat().st_size else {}",
         "cmd = '~/.local/bin/mmux-claude-hook'",
         "hook = {'matcher': '', 'hooks': [{'type': 'command', 'command': cmd}]}",
@@ -51,11 +64,19 @@ def prime_hooks(
 ) -> None:
     """Run a one-shot container on *target* that configures claude hooks on the home volume.
 
-    *home* is a ``volume:mount`` string passed directly to ``-v`` (the PMP volume is
-    not needed for priming — only the home volume).
+    *home* is a ``volume:mount[:[opts]]`` string passed directly to ``-v``.
+    The priming container runs as root so it can write to a fresh volume whose
+    root directory is owned by root.  The PMP volume is not needed for priming.
     """
-    script = _prime_script(pmp_mount)
-    cmd = [client, "run", "--rm", "-i", "-v", home, container, "bash", "-s"]
+    mount = _home_mount(home)
+    script = _prime_script(pmp_mount, mount)
+    cmd = [
+        client, "run", "--rm", "-i",
+        "--user", "root",
+        "-e", f"HOME={mount}",
+        "-v", home,
+        container, "bash", "-s",
+    ]
     log.info("priming container %s on %s", container, target)
     if target == "localhost":
         result = subprocess.run(cmd, input=script, capture_output=True, text=True, check=False)
