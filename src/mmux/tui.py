@@ -15,8 +15,8 @@ from rich.text import Text
 
 log = logging.getLogger(__name__)
 
-ACTIVE_SECS = 30
-SILENT_SECS = 300
+ACTIVE_SECS = 1
+SILENT_SECS = 1
 TIMER_INTERVAL = 10.0
 
 TMUX_PANE_FORMAT = "#{session_name}|#{window_index}|#{pane_index}|#{window_activity}|#{pane_current_path}|#{pane_current_command}"
@@ -645,16 +645,20 @@ class MmuxApp(App):
             elif isinstance(obj, Activity):
                 key = (target, obj.session, obj.window, obj.pane)
                 ps = self._pane_states.get(key) or PaneState(target, obj.session, obj.window, obj.pane)
-                ps.last_activity_ts = now
-                self._pane_states[key] = ps
-                self._refresh_tree()
+                # Level crossing: only update on silence→activity transition.
+                if ps.last_activity_ts <= ps.last_silence_ts:
+                    ps.last_activity_ts = now
+                    self._pane_states[key] = ps
+                    self._refresh_tree()
 
             elif isinstance(obj, Silence):
                 key = (target, obj.session, obj.window, obj.pane)
                 ps = self._pane_states.get(key) or PaneState(target, obj.session, obj.window, obj.pane)
-                ps.last_silence_ts = now
-                self._pane_states[key] = ps
-                self._refresh_tree()
+                # Level crossing: only update on activity→silence transition.
+                if ps.last_silence_ts <= ps.last_activity_ts:
+                    ps.last_silence_ts = now
+                    self._pane_states[key] = ps
+                    self._refresh_tree()
 
             elif isinstance(obj, Notification):
                 self._handle_notification(target, obj.message, obj.session_id)
