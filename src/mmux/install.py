@@ -33,12 +33,28 @@ printf '%s\n' "$json" > "$pmp/$fname"
 MMUX_CLAUDE_HOOK = r"""#!/usr/bin/env bash
 pmp="$(cat ~/.local/state/mmux/claude.pmp 2>/dev/null)" || exit 0
 ts="$(date -u +%FT%T.%3NZ)"
+if [ -n "$TMUX" ]; then
+    export MMUX_TMUX_SESSION="$(tmux display-message -p '#{session_name}' 2>/dev/null)"
+    export MMUX_TMUX_WINDOW="$(tmux display-message -p '#{window_index}' 2>/dev/null)"
+    export MMUX_TMUX_PANE="$(tmux display-message -p '#{pane_index}' 2>/dev/null)"
+fi
 json=$(python3 -c "
-import sys, json
+import sys, json, os
 data=json.load(sys.stdin)
 out={'proto':'claude','schema':'Notification','ts':'$ts',
      'message':data.get('message',''),
      'session_id':data.get('session_id','')}
+ts_name=os.environ.get('MMUX_TMUX_SESSION','')
+tw=os.environ.get('MMUX_TMUX_WINDOW','')
+tp=os.environ.get('MMUX_TMUX_PANE','')
+if ts_name:
+    out['tmux_session']=ts_name
+if tw:
+    try: out['tmux_window']=int(tw)
+    except ValueError: pass
+if tp:
+    try: out['tmux_pane']=int(tp)
+    except ValueError: pass
 print(json.dumps(out))
 ")
 fname="${ts//[:.]}$$"

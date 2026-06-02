@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from mmux.protos import register
 
 
@@ -8,3 +8,6 @@ class Notification:
     ts: str
     message: str
     session_id: str = ""
+    tmux_session: str = ""
+    tmux_window: int = -1
+    tmux_pane: int = -1

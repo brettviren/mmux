@@ -5,11 +5,11 @@ import shlex
 import time
 from pathlib import Path
 from mmux import ssh
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static, Tree
+from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Tree
 from textual.widgets.tree import TreeNode
 from rich.text import Text
 
@@ -31,7 +31,8 @@ class PaneState:
     last_activity_ts: float = 0.0
     last_silence_ts: float = 0.0
     closed: bool = False
-    notification: str | None = None
+    messages: list = field(default_factory=list)
+    has_messages: bool = False
     current_path: str = ""
     current_command: str = ""
 
@@ -92,8 +93,9 @@ def _pane_label(ps: PaneState, now: float,
             t.append(f"  {ps.current_command}", style="bold")
         if ps.current_path:
             t.append(f"  {ps.current_path}", style="dim")
-        if ps.notification:
-            t.append("  [!]", style="bold magenta")
+        if ps.has_messages:
+            icon = "\U0001f4ec" if ps.messages else "\U0001f4ea"
+            t.append(f"  {icon} {len(ps.messages)}", style="bold cyan")
     return t
 
 
@@ -106,6 +108,20 @@ def _session_label(session: str, panes: list[PaneState], now: float, closed: boo
     else:
         t.append(f"▶ {session}  ")
         t.append(light, style=color)
+        msg_count = sum(len(ps.messages) for ps in panes)
+        has_msgs = any(ps.has_messages for ps in panes)
+        if has_msgs:
+            icon = "\U0001f4ec" if msg_count else "\U0001f4ea"
+            t.append(f"  {icon} {msg_count}", style="bold cyan")
+    return t
+
+
+def _host_label(host: str, msg_count: int, has_messages: bool) -> Text:
+    t = Text()
+    t.append(host)
+    if has_messages:
+        icon = "\U0001f4ec" if msg_count else "\U0001f4ea"
+        t.append(f"  {icon} {msg_count}", style="bold cyan")
     return t
 
 
@@ -296,11 +312,13 @@ class SessionTree(Tree):
             node.collapse()
 
     def populate(self, states: list[PaneState],
+                 host_messages: dict | None = None,
+                 host_has_messages: set | None = None,
                  active_secs: float = ACTIVE_SECS, silent_secs: float = SILENT_SECS) -> None:
         new_structure = frozenset((ps.host, ps.session, ps.pane) for ps in states)
         if new_structure == self._tree_structure and self._node_map:
             # Structure unchanged: update labels in-place, cursor untouched.
-            self._update_labels(states, active_secs, silent_secs)
+            self._update_labels(states, host_messages, host_has_messages, active_secs, silent_secs)
             return
 
         self._tree_structure = new_structure
@@ -322,12 +340,15 @@ class SessionTree(Tree):
         by_host: dict[str, dict[str, list[PaneState]]] = {}
         for ps in states:
             by_host.setdefault(ps.host, {}).setdefault(ps.session, []).append(ps)
+        hm = host_messages or {}
+        hhm = host_has_messages or set()
 
         cursor_target: TreeNode | None = None
 
         for host, sessions in sorted(by_host.items()):
             host_node = self.root.add(
-                host, data=NodeData(host=host),
+                _host_label(host, len(hm.get(host, [])), host in hhm),
+                data=NodeData(host=host),
                 expand=(host,) not in self._collapsed,
             )
             self._node_map[(host, None, None)] = host_node
@@ -359,6 +380,8 @@ class SessionTree(Tree):
             self.move_cursor(cursor_target)
 
     def _update_labels(self, states: list[PaneState],
+                       host_messages: dict | None = None,
+                       host_has_messages: set | None = None,
                        active_secs: float = ACTIVE_SECS, silent_secs: float = SILENT_SECS) -> None:
         """Update node labels in-place without touching tree structure or cursor.
 
@@ -370,8 +393,17 @@ class SessionTree(Tree):
         by_host: dict[str, dict[str, list[PaneState]]] = {}
         for ps in states:
             by_host.setdefault(ps.host, {}).setdefault(ps.session, []).append(ps)
+        hm = host_messages or {}
+        hhm = host_has_messages or set()
         changed = False
         for host, sessions in by_host.items():
+            host_node = self._node_map.get((host, None, None))
+            if host_node is not None:
+                host_node._label = self.process_label(
+                    _host_label(host, len(hm.get(host, [])), host in hhm)
+                )
+                host_node._updates += 1
+                changed = True
             for session, panes in sessions.items():
                 all_closed = all(p.closed for p in panes)
                 sess_node = self._node_map.get((host, session, None))
@@ -410,6 +442,36 @@ class SessionTree(Tree):
                 log.warning("attach exited with code %d", rc)
 
 
+class MessagesDialog(ModalScreen):
+    """Shows pending non-tmux messages for the selected node."""
+
+    BINDINGS = [("escape", "dismiss_dialog", "Close"), ("m", "dismiss_dialog", "Close")]
+
+    def __init__(self, origin: str, messages: list[str]) -> None:
+        super().__init__()
+        self._origin = origin
+        self._messages = messages
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog-box messages-dialog-box"):
+            yield Label(f"Messages: {self._origin}", classes="dialog-title")
+            yield RichLog(id="messages-log", highlight=True, markup=True)
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Dismiss", variant="primary", id="btn-dismiss")
+
+    def on_mount(self) -> None:
+        log_widget = self.query_one("#messages-log", RichLog)
+        for msg in self._messages:
+            log_widget.write(msg)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-dismiss":
+            self.dismiss()
+
+    def action_dismiss_dialog(self) -> None:
+        self.dismiss()
+
+
 class MmuxApp(App):
     COMMAND_PALETTE_BINDING = "ctrl+h"
 
@@ -417,6 +479,7 @@ class MmuxApp(App):
         ("q", "quit", "Quit"),
         ("r", "reconnect", "Reconnect"),
         ("l", "toggle_log", "Log"),
+        ("m", "messages", "Messages"),
         ("a", "add", "Add"),
         ("n", "new", "New"),
         ("s", "save_config", "Save"),
@@ -427,15 +490,6 @@ class MmuxApp(App):
         width: 1fr;
         height: 1fr;
     }
-    #notif-bar {
-        height: 1;
-        background: $panel;
-        color: magenta;
-        display: none;
-    }
-    #notif-bar.visible {
-        display: block;
-    }
     #notif-log {
         height: 8;
         border: tall $panel;
@@ -444,7 +498,7 @@ class MmuxApp(App):
     #notif-log.visible {
         display: block;
     }
-    AddTargetDialog, NewSessionDialog, MmuxqNotInstalledDialog {
+    AddTargetDialog, NewSessionDialog, MmuxqNotInstalledDialog, MessagesDialog {
         align: center middle;
     }
     .dialog-box {
@@ -453,6 +507,14 @@ class MmuxApp(App):
         background: $surface;
         border: thick $primary;
         padding: 1 2;
+    }
+    .messages-dialog-box {
+        width: 80;
+        height: 24;
+    }
+    #messages-log {
+        height: 1fr;
+        border: tall $panel;
     }
     .dialog-title {
         text-align: center;
@@ -483,6 +545,8 @@ class MmuxApp(App):
         self.targets = targets or ["localhost"]
         self._pane_states: dict[tuple[str, str, int, int], PaneState] = {}
         self._session_filters: dict[str, str] = {}  # ssh_host -> session name to show
+        self._host_messages: dict[str, list[str]] = {}
+        self._host_has_messages: set[str] = set()
         self._active_secs = active_secs
         self._silent_secs = silent_secs
         self._last_display_refresh: float = 0.0
@@ -492,7 +556,6 @@ class MmuxApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         yield SessionTree("mmux", id="session-tree")
-        yield Static("", id="notif-bar")
         yield RichLog(id="notif-log", highlight=True, markup=True)
         yield Footer()
 
@@ -661,26 +724,44 @@ class MmuxApp(App):
                     self._refresh_tree()
 
             elif isinstance(obj, Notification):
-                self._handle_notification(target, obj.message, obj.session_id)
+                self._handle_notification(
+                    target, obj.message, obj.session_id,
+                    obj.tmux_session, obj.tmux_window, obj.tmux_pane,
+                )
 
-    def _handle_notification(self, target: str, message: str, session_id: str) -> None:
+    def _handle_notification(self, target: str, message: str, session_id: str,
+                             tmux_session: str = "", tmux_window: int = -1,
+                             tmux_pane: int = -1) -> None:
         matched_key: tuple | None = None
-        for key, ps in self._pane_states.items():
-            if key[0] == target and session_id and session_id in ps.session:
-                matched_key = key
-                break
 
-        if matched_key:
-            self._pane_states[matched_key].notification = message
-            self._refresh_tree()
+        # Prefer explicit tmux coordinates when available.
+        if tmux_session and tmux_window >= 0 and tmux_pane >= 0:
+            matched_key = (target, tmux_session, tmux_window, tmux_pane)
+            if matched_key not in self._pane_states:
+                matched_key = None
 
-        bar = self.query_one("#notif-bar", Static)
-        bar.update(f"[!] {message}")
-        bar.add_class("visible")
+        # Fall back to Claude session_id substring match against tmux session names.
+        if matched_key is None and session_id:
+            for key, ps in self._pane_states.items():
+                if key[0] == target and session_id in ps.session:
+                    matched_key = key
+                    break
 
-        log = self.query_one("#notif-log", RichLog)
-        origin = f"[{target}/{session_id}]" if session_id else f"[{target}]"
-        log.write(f"{origin} {message}")
+        if matched_key is not None:
+            ps = self._pane_states[matched_key]
+            ps.messages.append(message)
+            ps.has_messages = True
+            origin = f"{target}/{matched_key[1]}:{matched_key[3]}"
+        else:
+            msgs = self._host_messages.setdefault(target, [])
+            msgs.append(message)
+            self._host_has_messages.add(target)
+            origin = target
+
+        self._refresh_tree()
+
+        notif_log = self.query_one("#notif-log", RichLog)
+        notif_log.write(f"[{origin}] {message}")
 
     def _remove_keys(self, keys: list[tuple]) -> None:
         for k in keys:
@@ -699,6 +780,8 @@ class MmuxApp(App):
             ]
         tree.populate(
             states,
+            host_messages=self._host_messages,
+            host_has_messages=self._host_has_messages,
             active_secs=self._active_secs,
             silent_secs=self._silent_secs,
         )
@@ -709,11 +792,68 @@ class MmuxApp(App):
             self.run_worker(self._stream_target(target), exclusive=False)
 
     def action_toggle_log(self) -> None:
-        log = self.query_one("#notif-log", RichLog)
-        if "visible" in log.classes:
-            log.remove_class("visible")
+        log_widget = self.query_one("#notif-log", RichLog)
+        if "visible" in log_widget.classes:
+            log_widget.remove_class("visible")
         else:
-            log.add_class("visible")
+            log_widget.add_class("visible")
+
+    def action_messages(self) -> None:
+        tree = self.query_one(SessionTree)
+        node = tree.cursor_node
+        if node is None or node.data is None:
+            return
+        d: NodeData = node.data
+
+        if d.pane is not None:
+            matched_keys = [
+                k for k, ps in self._pane_states.items()
+                if k[0] == d.host and k[1] == d.session and k[3] == d.pane and ps.messages
+            ]
+            messages = [msg for k in matched_keys for msg in self._pane_states[k].messages]
+            if not messages:
+                return
+            origin = f"{d.host}/{d.session}:{d.pane}"
+
+            def on_pane_dismiss(_result: None) -> None:
+                for k in matched_keys:
+                    ps = self._pane_states.get(k)
+                    if ps:
+                        ps.messages.clear()
+                self._refresh_tree()
+
+            self.push_screen(MessagesDialog(origin, messages), on_pane_dismiss)
+
+        elif d.session is not None:
+            matched_keys = [
+                k for k, ps in self._pane_states.items()
+                if k[0] == d.host and k[1] == d.session and ps.messages
+            ]
+            messages = [msg for k in matched_keys for msg in self._pane_states[k].messages]
+            if not messages:
+                return
+            origin = f"{d.host}/{d.session}"
+
+            def on_session_dismiss(_result: None) -> None:
+                for k in matched_keys:
+                    ps = self._pane_states.get(k)
+                    if ps:
+                        ps.messages.clear()
+                self._refresh_tree()
+
+            self.push_screen(MessagesDialog(origin, messages), on_session_dismiss)
+
+        else:
+            host = d.host
+            messages = list(self._host_messages.get(host, []))
+            if not messages:
+                return
+
+            def on_host_dismiss(_result: None) -> None:
+                self._host_messages.pop(host, None)
+                self._refresh_tree()
+
+            self.push_screen(MessagesDialog(host, messages), on_host_dismiss)
 
     def action_add(self) -> None:
         def handle(result: tuple[str, str] | None) -> None:
