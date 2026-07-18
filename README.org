@@ -308,3 +308,8 @@ Each pane is annotated with a coloured dot:
 | ~●~    | green  | Activity within the last ~active_secs~ seconds    |
 | ~◎~    | yellow | Gone silent, or no activity for 30–300 s          |
 | ~○~    | white  | No activity for more than ~silent_secs~ seconds   |
+
+
+* Others
+
+See [[file:docs/others.org]]

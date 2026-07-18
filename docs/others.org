@@ -1,0 +1,19 @@
+#+title: Other projects that are similar to mmux
+
+* herder
+
+https://github.com/ogulcancelik/herdr
+
+- Rust
+- non tmux terminal persistence
+- In-band remote access via SSH to a running herdr daemon
+
+* aoe
+
+https://github.com/agent-of-empires/agent-of-empires
+
+- Rust
+- Uses tmux for persistence
+- TUI and WUI
+- No in-band remote access channel.
+  
